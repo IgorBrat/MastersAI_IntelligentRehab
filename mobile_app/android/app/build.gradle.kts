@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "ua.lpnu.intelligent_rehab"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = maxOf(flutter.compileSdkVersion, 36)
     ndkVersion = "27.0.12077973"
 
     compileOptions {

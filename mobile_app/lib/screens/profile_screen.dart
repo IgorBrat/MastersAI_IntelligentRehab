@@ -178,7 +178,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
             subtitle: info == null
                 ? null
                 : 'Пороги: ${info['thresholds'] != null ? 'каліброовані' : 'протокольні'}'
-                    ' · вільний темп: ${info['self_paced'] == true ? 'так' : 'ні'}',
+                    ' · вільний темп: ${info['self_paced'] == true ? 'так' : 'ні'}'
+                    '${info['model'] != null ? ' · модель: так' : ''}',
+          ),
+        if (state.excludedCriteria.isNotEmpty)
+          _Status(
+            icon: Icons.rule,
+            colour: scheme.tertiary,
+            title: 'Вимкнені критерії: ${state.excludedCriteria.join(', ')}',
+            subtitle: 'Ці помилки не перевіряються на цьому сенсорі й не '
+                'впливають на індекс якості.',
           )
         else
           _Status(

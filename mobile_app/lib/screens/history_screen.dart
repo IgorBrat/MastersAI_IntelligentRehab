@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../state/app_state.dart';
+import '../storage/local_store.dart';
 import '../storage/session_record.dart';
 
 /// Past sessions, newest first, from the phone's own store
@@ -51,10 +53,19 @@ class HistoryScreen extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Text('Заняття', style: Theme.of(context).textTheme.titleMedium),
-            TextButton.icon(
-              onPressed: () => _confirmClear(context),
-              icon: const Icon(Icons.delete_outline, size: 18),
-              label: const Text('Очистити'),
+            Row(
+              children: [
+                TextButton.icon(
+                  onPressed: () => _export(context),
+                  icon: const Icon(Icons.ios_share, size: 18),
+                  label: const Text('Експорт'),
+                ),
+                TextButton.icon(
+                  onPressed: () => _confirmClear(context),
+                  icon: const Icon(Icons.delete_outline, size: 18),
+                  label: const Text('Очистити'),
+                ),
+              ],
             ),
           ],
         ),
@@ -62,6 +73,25 @@ class HistoryScreen extends StatelessWidget {
           _SessionTile(session: session, name: _name(session.exerciseId), cue: _cue),
       ],
     );
+  }
+
+  Future<void> _export(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final file = await LocalStore.exportBundle();
+      final size = await file.length();
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path)],
+          subject: 'Дані реабілітації',
+          text: 'Експорт занять (${(size / 1e6).toStringAsFixed(1)} МБ)',
+        ),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('Не вдалося експортувати: $e')),
+      );
+    }
   }
 
   Future<void> _confirmClear(BuildContext context) async {
@@ -240,6 +270,33 @@ class _SessionTile extends StatelessWidget {
                       ),
                     ),
                 ],
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Icon(
+                      session.label == SupervisorLabel.none
+                          ? Icons.person_outline
+                          : Icons.verified_outlined,
+                      size: 16,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Спеціаліст: ${session.label.labelUk}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    if (session.recordingId != null) ...[
+                      const SizedBox(width: 12),
+                      Icon(Icons.save_outlined,
+                          size: 16, color: scheme.onSurfaceVariant),
+                      const SizedBox(width: 4),
+                      Text(
+                        'запис збережено',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ],
+                ),
               ],
             ),
           ),

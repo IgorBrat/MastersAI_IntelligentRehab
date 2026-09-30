@@ -6,6 +6,7 @@ class DetectedRep {
     required this.endMs,
     required this.peakValue,
     required this.baselineValue,
+    required this.returnedToRest,
   });
 
   final int index;
@@ -13,6 +14,9 @@ class DetectedRep {
   final int endMs;
   final double peakValue;
   final double baselineValue;
+
+  /// Whether the angle actually came back down to the resting band
+  final bool returnedToRest;
 
   Duration get duration => Duration(milliseconds: endMs - startMs);
 }
@@ -23,7 +27,10 @@ class RepDetector {
     required this.targetDeg,
     this.riseFraction = 0.55,
     this.fallFraction = 0.30,
+    this.restFraction = 0.15,
     this.minDurationSeconds = 0.8,
+    this.maxDurationSeconds = 20.0,
+    this.settleSeconds = 0.7,
     this.baselineSeconds = 0.5,
   });
 
@@ -32,8 +39,16 @@ class RepDetector {
 
   final double riseFraction;
   final double fallFraction;
+  final double restFraction;
 
   final double minDurationSeconds;
+
+  /// Force-emit after this long
+  final double maxDurationSeconds;
+
+  /// How long to wait, once the descent is under way, for a return to the
+  /// resting band before emitting the repetition anyway
+  final double settleSeconds;
 
   /// The resting pose is learned from this much of the start of the session
   final double baselineSeconds;
@@ -43,6 +58,16 @@ class RepDetector {
   int _lastMs = 0;
   bool _inRep = false;
   int _repStartMs = 0;
+
+  /// Last time the angle was inside the resting band while not in a repetition
+  int? _restingMs;
+
+  /// When the descent first crossed [fallFraction] during this repetition
+  int? _fallCrossedMs;
+
+  /// Set when a repetition ended with the arm still up, and cleared when the
+  /// angle finally returns to the resting band
+  bool _awaitingRest = false;
   double _peak = double.negativeInfinity;
   int _completed = 0;
 
@@ -64,6 +89,9 @@ class RepDetector {
     _lastMs = 0;
     _inRep = false;
     _repStartMs = 0;
+    _restingMs = null;
+    _fallCrossedMs = null;
+    _awaitingRest = false;
     _peak = double.negativeInfinity;
     _completed = 0;
   }
@@ -86,11 +114,18 @@ class RepDetector {
 
     final rise = _baseline! + riseFraction * excursion;
     final fall = _baseline! + fallFraction * excursion;
+    final rest = _baseline! + restFraction * excursion;
 
     if (!_inRep) {
-      if (value >= rise) {
+      if (value <= rest) {
+        _restingMs = timestampMs;
+        _awaitingRest = false;
+      }
+      if (!_awaitingRest && value >= rise) {
         _inRep = true;
-        _repStartMs = timestampMs;
+        _repStartMs = _restingMs ?? timestampMs;
+        _restingMs = null;
+        _fallCrossedMs = null;
         _peak = value;
       }
       return null;
@@ -98,22 +133,46 @@ class RepDetector {
 
     if (value > _peak) _peak = value;
 
-    final longEnough =
-        (timestampMs - _repStartMs) >= (minDurationSeconds * 1000).round();
-    if (value <= fall && longEnough) {
-      final rep = DetectedRep(
-        index: _completed,
-        startMs: _repStartMs,
-        endMs: timestampMs,
-        peakValue: _peak,
-        baselineValue: _baseline!,
-      );
-      _inRep = false;
-      _peak = double.negativeInfinity;
-      _completed += 1;
-      return rep;
+    final elapsed = timestampMs - _repStartMs;
+    final longEnough = elapsed >= (minDurationSeconds * 1000).round();
+    final tooLong = elapsed >= (maxDurationSeconds * 1000).round();
+
+    if (value <= rest) {
+      // A clean return to rest: the whole movement is in the window
+      if (longEnough) return _emit(timestampMs, returnedToRest: true);
+    } else if (value <= fall) {
+      _fallCrossedMs ??= timestampMs;
+      // The descent stalled above the resting band
+      final settled =
+          (timestampMs - _fallCrossedMs!) >= (settleSeconds * 1000).round();
+      if (longEnough && settled) {
+        return _emit(timestampMs, returnedToRest: false);
+      }
+    } else {
+      // Went back up: this is one repetition with a wobble, not two
+      _fallCrossedMs = null;
     }
+
+    if (tooLong) return _emit(timestampMs, returnedToRest: value <= rest);
     return null;
+  }
+
+  DetectedRep? _emit(int timestampMs, {required bool returnedToRest}) {
+    final rep = DetectedRep(
+      index: _completed,
+      startMs: _repStartMs,
+      endMs: timestampMs,
+      peakValue: _peak,
+      baselineValue: _baseline!,
+      returnedToRest: returnedToRest,
+    );
+    _inRep = false;
+    _peak = double.negativeInfinity;
+    _fallCrossedMs = null;
+    _restingMs = null;
+    _awaitingRest = !returnedToRest;
+    _completed += 1;
+    return rep;
   }
 }
 

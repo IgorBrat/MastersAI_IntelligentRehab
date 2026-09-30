@@ -215,6 +215,69 @@ def predict(
     }
 
 
+def fit_final(
+    dataset: RepetitionDataset,
+    config: TrainConfig | None = None,
+    *,
+    verbose: bool = True,
+) -> tuple[torch.nn.Module, dict]:
+    """Training ONE deployable model on every subject. Returns ``(model, provenance)``"""
+    cfg = config or TrainConfig()
+    if not len(dataset):
+        raise ValueError("cannot fit a model on an empty dataset")
+
+    summary = dataset.summary()
+    if verbose:
+        print(
+            f"fitting on ALL {summary['n_subjects']} subjects, "
+            f"{summary['n_samples']} repetitions -- no held-out fold"
+        )
+
+    model, history = train_model(dataset, cfg, verbose=verbose)
+
+    evaluable = dataset.filter(evaluable_only=True)
+
+    by_cohort: dict[str, int] = {}
+    cohort_subjects: dict[str, set] = {}
+    for sample in dataset.samples:
+        name = sample.meta.get("cohort") or "unknown"
+        by_cohort[name] = by_cohort.get(name, 0) + 1
+        cohort_subjects.setdefault(name, set()).add(sample.subject_id)
+
+    provenance = {
+        "architecture": cfg.model,
+        "train_config": asdict(cfg),
+        "history": {
+            "epochs_run": history.get("epochs_run"),
+            "best_val_loss": history.get("best_val_loss"),
+            "train_loss_final": (
+                history["train_loss"][-1] if history.get("train_loss") else None
+            ),
+        },
+        "dataset": {
+            **summary,
+            "exercise_ids": list(dataset.exercise_ids),
+            "n_evaluable": len(evaluable),
+            "label_sources": summary["by_label_source"],
+            "by_cohort": by_cohort,
+            "subjects_by_cohort": {
+                name: len(ids) for name, ids in sorted(cohort_subjects.items())
+            },
+            "mirrored": sum(
+                1 for s in dataset.samples if s.meta.get("mirrored")
+            ),
+        },
+        "angle_provenance": _angle_provenance(),
+        "accuracy": (
+            "NOT MEASURED HERE. Every subject was used for fitting, so this "
+            "artifact has no held-out estimate of its own. Quote the "
+            "leave-one-subject-out figure from the matching `train` report."
+        ),
+        "warnings": _warnings(dataset),
+    }
+    return model, provenance
+
+
 def cross_validate(
     dataset: RepetitionDataset,
     config: TrainConfig | None = None,

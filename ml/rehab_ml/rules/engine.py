@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -241,11 +241,86 @@ class SessionAssessment:
         }
 
 
+#: Joints without which no criterion for the working limb can be measured
+def critical_joints(side: Side) -> set[Joint]:
+    return {
+        joint_of(side, "SHOULDER"),
+        joint_of(side, "ELBOW"),
+        joint_of(side, "WRIST"),
+        Joint.L_HIP,
+        Joint.R_HIP,
+    }
+
+
+@dataclass(frozen=True)
+class FramingVerdict:
+    """Whether a recording can be scored at all, and what to tell the patient"""
+
+    view_ok: bool
+    joints_ok: bool
+    detected_view: str
+    yaw_deg: float
+    view_message_uk: str = ""
+    missing_joints: tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return self.view_ok and self.joints_ok
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+    @property
+    def message_uk(self) -> str:
+        """The one thing to tell the patient, view first"""
+        if not self.view_ok:
+            return self.view_message_uk
+        if not self.joints_ok:
+            return (
+                "Не вдалося надійно розпізнати ключові точки тіла. Переконайтесь, "
+                "що вся рука і тулуб у кадрі, а освітлення достатнє."
+            )
+        return ""
+
+
+def framing_verdict(
+    seq: PoseSequence,
+    exercise: ExerciseDefinition,
+    side: Side,
+    *,
+    confidence_threshold: float = 0.4,
+) -> FramingVerdict:
+    view = _check(seq, exercise.required_view)
+    missing = critical_joints(side) & set(
+        seq.low_confidence_joints(threshold=confidence_threshold)
+    )
+    return FramingVerdict(
+        view_ok=view.ok,
+        joints_ok=not missing,
+        detected_view=view.detected.name,
+        yaw_deg=view.yaw_deg,
+        view_message_uk=view.message_uk,
+        missing_joints=tuple(sorted(j.name for j in missing)),
+    )
+
+
 class RuleEngine:
     """Evaluates repetitions against an exercise's clinical criteria"""
 
-    def __init__(self, eqi_config: EqiConfig | None = None) -> None:
-        self.eqi_config = eqi_config or EqiConfig()
+    def __init__(
+        self,
+        eqi_config: EqiConfig | None = None,
+        *,
+        excluded_errors: frozenset[ErrorType] = frozenset(),
+    ) -> None:
+        self.excluded_errors = frozenset(excluded_errors)
+
+        config = eqi_config or EqiConfig()
+        if ErrorType.JERKY_MOVEMENT in self.excluded_errors:
+            config = replace(
+                config, weights=replace(config.weights, smoothness=0.0)
+            )
+        self.eqi_config = config
 
     # per repetition
     def assess_repetition(
@@ -350,18 +425,21 @@ class RuleEngine:
             if not np.isfinite(smooth.sparc)
             else max(0.0, exercise.sparc_floor - smooth.sparc)
         )
-        findings.append(
-            Finding(
-                error=ErrorType.JERKY_MOVEMENT,
-                severity=grade(sparc_deficit, exercise.sparc_tolerance),
-                measured=sparc_deficit,
-                threshold=exercise.sparc_tolerance.mild,
-                unit=" SPARC",
+        if ErrorType.JERKY_MOVEMENT not in self.excluded_errors:
+            findings.append(
+                Finding(
+                    error=ErrorType.JERKY_MOVEMENT,
+                    severity=grade(sparc_deficit, exercise.sparc_tolerance),
+                    measured=sparc_deficit,
+                    threshold=exercise.sparc_tolerance.mild,
+                    unit=" SPARC",
+                )
             )
-        )
 
         # Compensation criteria
         for limit in exercise.compensations:
+            if limit.error in self.excluded_errors:
+                continue
             finding, penalty = compensation_penalty(angles, exercise, limit)
             findings.append(finding)
             penalties[limit.error] = penalty
@@ -403,24 +481,13 @@ class RuleEngine:
         """Segmenting and score a whole recorded set"""
         session = SessionAssessment(exercise_id=exercise.id, side=side)
 
-        if check_view:
-            verdict = _check(seq, exercise.required_view)
-            if not verdict.ok:
-                session.rejection_reason_uk = verdict.message_uk
-                return session
-
-        low_conf = seq.low_confidence_joints(threshold=0.4)
-        critical = {
-            joint_of(side, "SHOULDER"),
-            joint_of(side, "ELBOW"),
-            joint_of(side, "WRIST"),
-            Joint.L_HIP,
-            Joint.R_HIP,
-        }
-        if critical & set(low_conf):
-            session.rejection_reason_uk = (
-                "Не вдалося надійно розпізнати ключові точки тіла. Переконайтесь, що вся рука і тулуб у кадрі, а освітлення достатнє."
-            )
+        # The same gate `/check/readiness` runs before the set starts
+        framing = framing_verdict(seq, exercise, side)
+        if check_view and not framing.view_ok:
+            session.rejection_reason_uk = framing.view_message_uk
+            return session
+        if not framing.joints_ok:
+            session.rejection_reason_uk = framing.message_uk
             return session
 
         angles = compute_angles(seq, side)

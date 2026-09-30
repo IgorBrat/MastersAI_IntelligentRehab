@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Sequence
 from pathlib import Path
 from dataclasses import replace as _replace
 
@@ -11,20 +13,23 @@ from ..exercises.registry import all_exercises, as_self_paced, get_exercise, Pre
 from ..features.angles import compute_angles
 from ..pose.mediapipe_estimator import landmarks_to_canonical
 from ..pose.normalize import preprocess
-from ..rules.engine import RuleEngine
+from ..rules.engine import RuleEngine, framing_verdict
 from ..rules.calibration import load_calibrations, apply_to_exercise
 from ..schema import PoseSequence, Side
-from ..taxonomy import ERROR_SPECS
+from ..taxonomy import ERROR_BY_SLUG, ERROR_SPECS
 from ..adaptation import SessionRecord, decide
 from .schemas import (
     CoachRequest,
     CoachResponse,
     ExerciseInfo,
     PoseFrames,
+    ReadinessInfo,
     ServiceInfo,
     VideoRequest,
 )
+from ..training.export import _git_sha
 from .coach import phrase
+from .inference import ModelRunner
 
 
 def _to_sequence(body: PoseFrames) -> PoseSequence:
@@ -53,22 +58,68 @@ def _to_sequence(body: PoseFrames) -> PoseSequence:
 VIDEO_SUFFIXES = (".mp4", ".mov", ".avi", ".mkv", ".m4v")
 
 
+def _sha256(path: str | Path) -> str | None:
+    """Hashing the threshold file, so a report records the exact bytes used"""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
 def create_app(
     *,
     self_paced: bool = False,
     thresholds: str | Path | None = None,
     video_dir: str | Path | None = None,
+    model: str | Path | None = None,
+    exclude_criteria: Sequence[str] = (),
 ) -> FastAPI:
     calibrations: dict = {}
     provenance: dict | None = None
     if thresholds is not None:
         calibrations, provenance = load_calibrations(thresholds)
 
-    engine = RuleEngine()
+    warnings: list[str] = []
+    if thresholds is None:
+        # Three protocol bands are far too tight for real movement; with them the
+        # rule engine marks nearly every repetition incorrect.
+        warnings.append(
+            "No --thresholds file: the protocol bands are in force, and three of "
+            "them are known to be several times too tight for real movement."
+        )
+
+    excluded = set()
+    for slug in exclude_criteria:
+        if slug not in ERROR_BY_SLUG:
+            raise ValueError(
+                f"unknown criterion {slug!r}; known: {', '.join(sorted(ERROR_BY_SLUG))}"
+            )
+        excluded.add(ERROR_BY_SLUG[slug])
+    if excluded:
+        warnings.append(
+            "Criteria switched off for this sensor: "
+            + ", ".join(sorted(ERROR_SPECS[e].name_short for e in excluded))
+            + ". They cannot appear in any assessment, and the quality index is "
+            "computed without them."
+        )
+
+    runner: ModelRunner | None = None
+    if model is not None:
+        runner = ModelRunner.from_path(model)
+        warnings.extend(runner.startup_warnings(self_paced=self_paced))
+        if excluded:
+            warnings.append(
+                "The model was trained against rule-engine targets computed WITH "
+                "every criterion. Its output is not adjusted for the exclusions above."
+            )
+
+    engine = RuleEngine(excluded_errors=frozenset(excluded))
     app = FastAPI(
         title="rehab-ml",
         summary="Movement-quality assessment for post-stroke home rehabilitation",
     )
+    # So `serve` can print them where the operator sees them, not only in /health
+    app.state.warnings = warnings
 
     def resolve(exercise_id: str) -> ExerciseDefinition:
         """Looking up an exercise and applying the process-wide scoring configuration"""
@@ -95,6 +146,11 @@ def create_app(
             self_paced=self_paced,
             thresholds=None if thresholds is None else str(thresholds),
             thresholds_provenance=provenance,
+            thresholds_sha256=None if thresholds is None else _sha256(thresholds),
+            git_sha=_git_sha(),
+            model=None if runner is None else runner.info(),
+            excluded_criteria=sorted(ERROR_SPECS[e].name_short for e in excluded),
+            warnings=warnings,
         )
 
     @app.get("/exercises", response_model=list[ExerciseInfo])
@@ -129,13 +185,78 @@ def create_app(
             )
         return out
 
+    def attach_model(
+        payload: dict,
+        session,
+        sequence: PoseSequence,
+        definition: ExerciseDefinition,
+        side: Side,
+    ) -> dict:
+        """Adding the model's per-repetition output beside the rule engine's"""
+        if runner is None or not session.repetitions:
+            return payload
+        if not runner.applies_to(definition.id):
+            payload["model"] = {
+                "skipped": (
+                    f"artifact was fitted for {runner.exercise_id!r}, "
+                    f"this request is {definition.id!r}"
+                )
+            }
+            return payload
+
+        angles = compute_angles(sequence, side)
+        predictions = []
+        for rep, rep_payload in zip(session.repetitions, payload["repetitions"]):
+            start, end = rep.frames
+            prediction = runner.predict(
+                angles.slice(start, end),
+                definition,
+                rule_eqi=float(rep.quality.value),
+            )
+            rep_payload["model"] = prediction
+            predictions.append(prediction)
+
+        payload["model"] = {
+            "artifact": runner.path.name,
+            "exercise_id": runner.exercise_id,
+            "mean_eqi": round(
+                float(np.mean([p["eqi"] for p in predictions])), 2
+            ),
+            "mean_correct_prob": round(
+                float(np.mean([p["correct_prob"] for p in predictions])), 3
+            ),
+            "mean_eqi_correction": round(
+                float(np.mean([p["eqi_correction"] for p in predictions])), 2
+            ),
+            "validated_on_phone": False,
+        }
+        return payload
+
+    @app.post("/check/readiness", response_model=ReadinessInfo)
+    def check_readiness(body: PoseFrames) -> ReadinessInfo:
+        """Is the camera placed well enough to start? Runs on ~2 s of frames"""
+        definition = resolve(body.exercise_id)
+        side = parse_side(body.side)
+        verdict = framing_verdict(_to_sequence(body), definition, side)
+        return ReadinessInfo(
+            ready=verdict.ok,
+            view_ok=verdict.view_ok,
+            joints_ok=verdict.joints_ok,
+            required_view=definition.required_view.name,
+            detected_view=verdict.detected_view,
+            yaw_deg=round(verdict.yaw_deg, 1),
+            message_uk=verdict.message_uk or "Готово - можна починати",
+            missing_joints=list(verdict.missing_joints),
+        )
+
     @app.post("/assess/session")
     def assess_session(body: PoseFrames) -> dict:
         """Scoring a complete set by segmenting it into repetitions first"""
         definition = resolve(body.exercise_id)
         side = parse_side(body.side)
-        session = engine.assess_sequence(_to_sequence(body), definition, side)
-        return session.as_dict()
+        sequence = _to_sequence(body)
+        session = engine.assess_sequence(sequence, definition, side)
+        return attach_model(session.as_dict(), session, sequence, definition, side)
 
 
     @app.post("/coach", response_model=CoachResponse)
@@ -214,7 +335,7 @@ def create_app(
             raise HTTPException(422, f"could not read poses from {target.name}: {exc}") from exc
 
         session = engine.assess_sequence(sequence, definition, side)
-        out = session.as_dict()
+        out = attach_model(session.as_dict(), session, sequence, definition, side)
         out["video"] = {
             "name": target.name,
             "frames": int(sequence.n_frames),
@@ -234,7 +355,21 @@ def create_app(
         assessment = engine.assess_repetition(
             angles, definition, frames=(0, sequence.n_frames)
         )
-        return assessment.as_dict()
+        payload = assessment.as_dict()
+
+        if runner is not None:
+            if runner.applies_to(definition.id):
+                payload["model"] = runner.predict(
+                    angles, definition, rule_eqi=float(assessment.quality.value)
+                )
+            else:
+                payload["model"] = {
+                    "skipped": (
+                        f"artifact was fitted for {runner.exercise_id!r}, "
+                        f"this request is {definition.id!r}"
+                    )
+                }
+        return payload
 
     return app
 

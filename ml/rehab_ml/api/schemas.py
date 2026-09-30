@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field, field_validator
 # MediaPipe Pose emits a fixed 33-landmark topology.
 N_LANDMARKS = 33
 
-MAX_FRAMES = 1800
+MAX_FRAMES = 5400
 
 
 class PoseFrames(BaseModel):
@@ -72,11 +72,31 @@ class ExerciseInfo(BaseModel):
     watched_errors: list[dict]
 
 
+class ReadinessInfo(BaseModel):
+    """Whether the framing is good enough to start a set"""
+
+    ready: bool
+    view_ok: bool
+    joints_ok: bool
+    required_view: str
+    detected_view: str
+    yaw_deg: float
+    message_uk: str
+    missing_joints: list[str] = Field(default_factory=list)
+
+
 class ServiceInfo(BaseModel):
     status: str
     self_paced: bool
     thresholds: str | None
     thresholds_provenance: dict | None
+
+    thresholds_sha256: str | None = None
+    git_sha: str | None = None
+    #: Criteria switched off for this sensor, by slug. Empty is the normal case
+    excluded_criteria: list[str] = Field(default_factory=list)
+    model: dict | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class SessionHistoryItem(BaseModel):

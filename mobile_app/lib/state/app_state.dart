@@ -104,6 +104,24 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Recording a supervising specialist's verdict on one stored set
+  Future<void> labelSession(
+    SessionRecord session, {
+    required SupervisorLabel label,
+    String? note,
+  }) async {
+    final updated = session.copyWith(label: label, note: note);
+    await LocalStore.updateSession(updated);
+    _history = await LocalStore.history();
+    notifyListeners();
+  }
+
+  /// Criteria the service has switched off, by slug
+  List<String> get excludedCriteria => [
+        for (final slug in (_serviceInfo?['excluded_criteria'] as List? ?? []))
+          slug.toString(),
+      ];
+
   /// Applying a coach decision: store the new dose and any unlocked exercise
   Future<void> applyAdvice(String exerciseId, CoachAdvice advice) async {
     final doses = Map<String, Dose>.from(_profile.doses);

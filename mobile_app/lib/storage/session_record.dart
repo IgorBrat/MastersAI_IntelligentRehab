@@ -1,3 +1,26 @@
+/// What a supervising specialist judged of a recorded set
+enum SupervisorLabel {
+  /// Nobody has judged this set
+  none('none'),
+  correct('correct'),
+  incorrect('incorrect');
+
+  const SupervisorLabel(this.wire);
+  final String wire;
+
+  static SupervisorLabel parse(String? raw) => switch (raw) {
+        'correct' => SupervisorLabel.correct,
+        'incorrect' => SupervisorLabel.incorrect,
+        _ => SupervisorLabel.none,
+      };
+
+  String get labelUk => switch (this) {
+        SupervisorLabel.correct => 'правильно',
+        SupervisorLabel.incorrect => 'з помилками',
+        SupervisorLabel.none => 'не оцінено',
+      };
+}
+
 /// One completed session, as stored on the phone and replayed to the coach
 class SessionRecord {
   const SessionRecord({
@@ -11,6 +34,9 @@ class SessionRecord {
     this.fatigueTrend = 0.0,
     this.errorFrequency = const {},
     this.rejectionUk,
+    this.label = SupervisorLabel.none,
+    this.note = '',
+    this.recordingId,
   });
 
   final String exerciseId;
@@ -30,11 +56,42 @@ class SessionRecord {
 
   final String? rejectionUk;
 
+  /// The supervising specialist's judgement, when one has been given
+  final SupervisorLabel label;
+
+  /// Free text from whoever labelled it
+  final String note;
+
+  /// Name of the stored raw-landmark file, when the recording was kept
+  final String? recordingId;
+
+  SessionRecord copyWith({
+    SupervisorLabel? label,
+    String? note,
+    String? recordingId,
+  }) =>
+      SessionRecord(
+        exerciseId: exerciseId,
+        timestamp: timestamp,
+        usable: usable,
+        meanEqi: meanEqi,
+        grade: grade,
+        nReps: nReps,
+        correctRatio: correctRatio,
+        fatigueTrend: fatigueTrend,
+        errorFrequency: errorFrequency,
+        rejectionUk: rejectionUk,
+        label: label ?? this.label,
+        note: note ?? this.note,
+        recordingId: recordingId ?? this.recordingId,
+      );
+
   /// Building from an `/assess/session` response body
   factory SessionRecord.fromAssessment(
     String exerciseId,
     Map<String, dynamic> body, {
     DateTime? at,
+    String? recordingId,
   }) {
     final errors = <String, double>{};
     final raw = body['error_frequency'];
@@ -54,6 +111,7 @@ class SessionRecord {
       fatigueTrend: (body['fatigue_trend'] as num?)?.toDouble() ?? 0.0,
       errorFrequency: errors,
       rejectionUk: body['rejection_reason_uk'] as String?,
+      recordingId: recordingId,
     );
   }
 
@@ -72,6 +130,9 @@ class SessionRecord {
             e.key.toString(): (e.value as num).toDouble(),
         },
         rejectionUk: json['rejection_reason_uk'] as String?,
+        label: SupervisorLabel.parse(json['label'] as String?),
+        note: json['note'] as String? ?? '',
+        recordingId: json['recording_id'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
@@ -85,6 +146,9 @@ class SessionRecord {
         'fatigue_trend': fatigueTrend,
         'error_frequency': errorFrequency,
         'rejection_reason_uk': rejectionUk,
+        'label': label.wire,
+        'note': note,
+        'recording_id': recordingId,
       };
 
   /// The subset `/coach` accepts. Rejected sessions are sent too

@@ -315,6 +315,117 @@ def train(
 
 
 @app.command()
+def export(
+    corpus: str = typer.Argument(...),
+    root: Path = typer.Option(..., help="Dataset root directory."),
+    out: Path = typer.Option(..., help="Where to write the .pt artifact."),
+    model: str = typer.Option("hybrid", help="lstm | tcn | hybrid"),
+    epochs: int = typer.Option(60),
+    exercise: str = typer.Option(
+        None,
+        help="Restrict to one exercise id. Recommended: the per-exercise "
+             "specialist models beat the pooled one on every exercise.",
+    ),
+    mirror: bool = typer.Option(True, help="Mirror-augment the training data."),
+    no_aux: bool = typer.Option(
+        False,
+        "--no-aux",
+        help="Disable the per-error and EQI heads, for corpora whose only human "
+             "label is correct/incorrect.",
+    ),
+    self_paced: bool = typer.Option(
+        False,
+        "--self-paced",
+        help="Drop tempo/hold criteria; required for corpora with no prescribed tempo.",
+    ),
+    loso_report: Path = typer.Option(
+        None,
+        help="The matching `train` report. Recorded in the sidecar as the source "
+             "of this artifact's only honest accuracy figure.",
+    ),
+) -> None:
+    """Fit one deployable model on ALL subjects and export it for `serve`"""
+    from .data.dataset import build_dataset
+    from .models.heads import LossWeights
+    from .training.export import save
+    from .training.train import TrainConfig, fit_final
+
+    adapter = _load_adapter(corpus, root)
+    dataset = build_dataset(adapter, mirror_augment=mirror, self_paced=self_paced)
+    if exercise:
+        dataset = dataset.filter(exercise_id=exercise)
+    if not len(dataset):
+        console.print("[red]No samples after filtering.[/red]")
+        raise typer.Exit(code=1)
+
+    weights = LossWeights(errors=0.0, eqi=0.0) if no_aux else LossWeights()
+    cfg = TrainConfig(model=model, epochs=epochs, loss_weights=weights)
+
+    trained, provenance = fit_final(dataset, cfg)
+
+    reference = None
+    if loso_report is not None:
+        if not loso_report.is_file():
+            console.print(f"[red]no such report: {loso_report}[/red]")
+            raise typer.Exit(code=1)
+        report = json.loads(loso_report.read_text(encoding="utf-8"))
+        scope = report.get("per_exercise", {}).get(exercise) if exercise else None
+        scope = scope or report.get("overall") or report
+        patient = scope.get("by_cohort", {}).get("patient", {}).get("model", {})
+        reference = {
+            "path": str(loso_report),
+            "balanced_accuracy_all": scope.get("rule_vs_model", {})
+            .get("model", {})
+            .get("balanced_accuracy"),
+            "balanced_accuracy_patients": patient.get("balanced_accuracy"),
+            "n": patient.get("n"),
+        }
+
+    provenance = {
+        **provenance,
+        "corpus": corpus,
+        "corpus_root": str(root),
+        "exercise_id": exercise,
+        "self_paced": self_paced,
+        "mirror_augment": mirror,
+        "no_aux": no_aux,
+        "loso_reference": reference,
+    }
+
+    artifact, sidecar = save(
+        trained, out, feature_config=dataset.feature_config, provenance=provenance
+    )
+
+    for warning in provenance["warnings"]:
+        console.print(f"[yellow]warning:[/yellow] {warning}")
+
+    table = Table(title="exported artifact", show_lines=False)
+    for column in ("field", "value"):
+        table.add_column(column, overflow="fold")
+    size_mb = artifact.stat().st_size / 1e6
+    table.add_row("artifact", f"{artifact}  ({size_mb:.2f} MB)")
+    table.add_row("sidecar", str(sidecar))
+    table.add_row("architecture", model)
+    table.add_row("exercise", exercise or "ALL (pooled)")
+    table.add_row("repetitions", str(provenance["dataset"]["n_samples"]))
+    table.add_row("subjects", str(provenance["dataset"]["n_subjects"]))
+    table.add_row("epochs run", str(provenance["history"]["epochs_run"]))
+    if reference and reference["balanced_accuracy_patients"] is not None:
+        table.add_row(
+            "LOSO balanced acc (patients)",
+            f"{reference['balanced_accuracy_patients']:.3f}  [dim]from {loso_report.name}[/dim]",
+        )
+    console.print(table)
+    console.print(
+        "[yellow]This artifact was fitted on every subject and has NO held-out "
+        "accuracy of its own.[/yellow] Quote the LOSO figure from `train`."
+    )
+    console.print("")
+    console.print("Serve it with:")
+    console.print(f"  python -m rehab_ml serve --model {out}")
+
+
+@app.command()
 def eqi(
     corpus: str = typer.Argument("kimore", help="Corpus with clinician scores."),
     root: Path = typer.Option(..., help="Dataset root directory."),
@@ -534,14 +645,11 @@ def assess(
     self_paced: bool = typer.Option(
         False,
         "--self-paced",
-        help="Drop the prescribed tempo and end-range hold. Use when the recording "
-             "was not made to the protocol's 3s/2s/3s timing - otherwise "
-             "INSUFFICIENT_HOLD and EXCESSIVE_SPEED fire on almost every repetition.",
+        help="Drop the prescribed tempo and end-range hold.",
     ),
     thresholds: Path = typer.Option(
         None,
-        help="Threshold file from `rehab-ml calibrate`. Without it the protocol's "
-             "own bands are used, three of which are far too tight for real movement.",
+        help="Threshold file from `rehab-ml calibrate`",
     ),
 ) -> None:
     """Scoring one recorded video with the rule engine"""
@@ -719,6 +827,19 @@ def serve(
              "default, because a naturally-paced recording otherwise trips "
              "INSUFFICIENT_HOLD and EXCESSIVE_SPEED on nearly every repetition.",
     ),
+    model: Path = typer.Option(
+        None,
+        help="Exported model artifact from `export`. Its output is returned "
+             "BESIDE the rule engine's, never instead of it.",
+    ),
+    exclude_criteria: list[str] = typer.Option(
+        [],
+        "--exclude-criteria",
+        help="Switch a criterion off by slug, e.g. --exclude-criteria "
+             "jerky_movement. For a criterion whose calibrated threshold does "
+             "not transfer to this sensor. Removes it from the findings AND from "
+             "the quality index.",
+    ),
 ) -> None:
     import socket
 
@@ -727,7 +848,11 @@ def serve(
     from .api.service import create_app
 
     service = create_app(
-        self_paced=not protocol_tempo, thresholds=thresholds, video_dir=video_dir
+        self_paced=not protocol_tempo,
+        thresholds=thresholds,
+        video_dir=video_dir,
+        model=model,
+        exclude_criteria=exclude_criteria,
     )
 
     try:
@@ -742,8 +867,13 @@ def serve(
     console.print(
         f"self-paced: {not protocol_tempo} · "
         f"thresholds: {thresholds if thresholds else 'protocol'} · "
-        f"videos: {video_dir if video_dir else 'none'}"
+        f"videos: {video_dir if video_dir else 'none'} · "
+        f"model: {model.name if model else 'rules only'}"
     )
+
+    for warning in service.state.warnings:
+        console.print(f"[yellow]warning:[/yellow] {warning}")
+
     uvicorn.run(service, host=host, port=port)
 
 

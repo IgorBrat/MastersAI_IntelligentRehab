@@ -9,8 +9,11 @@ enum RepPhase {
   /// Below target and still going up
   raising,
 
-  /// At or past the prescribed excursion
+  /// At or past the prescribed excursion, and the hold is still running
   atTarget,
+
+  /// The hold is done -- this is the cue to START coming down
+  lowerNow,
 
   /// Coming back down
   lowering,
@@ -18,7 +21,21 @@ enum RepPhase {
   overshoot,
 }
 
-/// Deciding the phase from the current angle and the direction of travel
+/// How close to [target] still counts as "at target"
+///
+/// Shared with the caller because the caller has to time the hold, and it can
+/// only time it if it enters the band on exactly the same frame this function
+/// does.
+const double kTargetToleranceDeg = 5.0;
+
+/// Deciding the phase from the current angle, the direction of travel and how
+/// long the patient has been at the top
+///
+/// [secondsAtTarget] is measured from the frame the angle first entered the
+/// target band, and [holdSeconds] is how long it should stay there. Once the
+/// hold is satisfied the phase becomes [RepPhase.lowerNow] -- the INSTRUCTION to
+/// come down, as opposed to [RepPhase.lowering], which is an observation that
+/// the patient already is
 RepPhase repPhase({
   required double angleDeg,
   required double target,
@@ -26,11 +43,15 @@ RepPhase repPhase({
   required bool rising,
   required bool calibrating,
   required bool detectorInRep,
-  double tolerance = 5.0,
+  double secondsAtTarget = 0.0,
+  double holdSeconds = 0.0,
+  double tolerance = kTargetToleranceDeg,
 }) {
   if (calibrating) return RepPhase.calibrating;
   if (angleDeg > ceiling) return RepPhase.overshoot;
-  if (angleDeg >= target - tolerance) return RepPhase.atTarget;
+  if (angleDeg >= target - tolerance) {
+    return secondsAtTarget >= holdSeconds ? RepPhase.lowerNow : RepPhase.atTarget;
+  }
   if (!detectorInRep) return RepPhase.resting;
   return rising ? RepPhase.raising : RepPhase.lowering;
 }

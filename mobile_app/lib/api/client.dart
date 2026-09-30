@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show compute;
 import 'package:http/http.dart' as http;
 
 import '../analysis/live_angles.dart';
@@ -12,8 +13,10 @@ class ExerciseInfo {
     required this.id,
     required this.nameUk,
     required this.requiredView,
+    required this.primaryChannel,
     required this.targetDeg,
     required this.ceilingDeg,
+    required this.holdSeconds,
     required this.defaultReps,
     required this.instructionsUk,
     required this.watchedErrors,
@@ -22,10 +25,17 @@ class ExerciseInfo {
   final String id;
   final String nameUk;
   final String requiredView;
+
+  /// `AngleSeries` channel the repetition excursion is measured on
+  final String primaryChannel;
+
   final double targetDeg;
 
   /// Upper bound of the therapist's envelope - the highest target adaptive progression would ever set
   final double ceilingDeg;
+
+  /// Prescribed end-range hold, seconds
+  final double holdSeconds;
 
   final int defaultReps;
   final String instructionsUk;
@@ -37,10 +47,12 @@ class ExerciseInfo {
         id: json['id'] as String,
         nameUk: json['name_uk'] as String,
         requiredView: json['required_view'] as String,
+        primaryChannel: json['primary_channel'] as String? ?? 'shoulder_elevation',
         targetDeg: (json['target_deg'] as num).toDouble(),
         // Fall back to the target rather than to zero
         ceilingDeg: (json['ceiling_deg'] as num?)?.toDouble() ??
             (json['target_deg'] as num).toDouble() * 1.5,
+        holdSeconds: (json['hold_s'] as num?)?.toDouble() ?? 0.0,
         defaultReps: (json['default_reps'] as num).toInt(),
         instructionsUk: json['instructions_uk'] as String? ?? '',
         watchedErrors: {
@@ -78,6 +90,45 @@ class Assessment {
         for (final r in (json['repetitions'] as List? ?? []))
           Assessment((r as Map).cast<String, dynamic>()),
       ];
+}
+
+/// Whether the camera is placed well enough to start a set
+class Readiness {
+  Readiness({
+    required this.ready,
+    required this.viewOk,
+    required this.jointsOk,
+    required this.requiredView,
+    required this.detectedView,
+    required this.yawDeg,
+    required this.messageUk,
+    required this.missingJoints,
+  });
+
+  final bool ready;
+  final bool viewOk;
+  final bool jointsOk;
+  final String requiredView;
+  final String detectedView;
+
+  /// 0 = facing the camera, 90 = fully side-on
+  final double yawDeg;
+
+  final String messageUk;
+  final List<String> missingJoints;
+
+  factory Readiness.fromJson(Map<String, dynamic> json) => Readiness(
+        ready: json['ready'] as bool? ?? false,
+        viewOk: json['view_ok'] as bool? ?? false,
+        jointsOk: json['joints_ok'] as bool? ?? false,
+        requiredView: json['required_view'] as String? ?? '',
+        detectedView: json['detected_view'] as String? ?? '',
+        yawDeg: (json['yaw_deg'] as num?)?.toDouble() ?? 0,
+        messageUk: json['message_uk'] as String? ?? '',
+        missingJoints: [
+          for (final j in (json['missing_joints'] as List? ?? [])) j as String,
+        ],
+      );
 }
 
 /// One pre-recorded clip the service offers for scoring
@@ -172,6 +223,14 @@ class RehabApi {
     return (body as Map).cast<String, dynamic>();
   }
 
+  /// The wire body for a window, exposed so a recording can be stored verbatim
+  Future<Map<String, Object>> recordingPayload({
+    required String exerciseId,
+    required BodySide side,
+    required List<PoseFrame> frames,
+  }) =>
+      _wire(exerciseId, side, frames);
+
   Future<List<ExerciseInfo>> exercises() async {
     final body = await _get('/exercises') as List;
     return [
@@ -205,6 +264,17 @@ class RehabApi {
     return Assessment((body as Map).cast<String, dynamic>());
   }
 
+  /// Asking whether the framing is good enough to start, before the patient does
+  Future<Readiness> checkReadiness({
+    required String exerciseId,
+    required BodySide side,
+    required List<PoseFrame> frames,
+  }) async {
+    if (frames.isEmpty) throw ApiException('no frames to check');
+    final body = await _post('/check/readiness', await _wire(exerciseId, side, frames));
+    return Readiness.fromJson((body as Map).cast<String, dynamic>());
+  }
+
   /// Scoring one already-segmented repetition - the live path
   Future<Assessment> assessRepetition({
     required String exerciseId,
@@ -221,6 +291,21 @@ class RehabApi {
   }) =>
       _assess('/assess/session', exerciseId, side, frames);
 
+  /// Building the wire body for a window of frames
+  Future<Map<String, Object>> _wire(
+    String exerciseId,
+    BodySide side,
+    List<PoseFrame> frames,
+  ) async {
+    return {
+      'exercise_id': exerciseId,
+      'side': side.wire,
+      'fps': effectiveFps([for (final f in frames) f.timestampMs]),
+      'landmarks': [for (final f in frames) f.toNestedWorld()],
+      'visibility': [for (final f in frames) f.toVisibilityList()],
+    };
+  }
+
   Future<Assessment> _assess(
     String path,
     String exerciseId,
@@ -228,16 +313,25 @@ class RehabApi {
     List<PoseFrame> frames,
   ) async {
     if (frames.isEmpty) throw ApiException('no frames to score');
-    // The rate is MEASURED from the frames, never assumed
-    final payload = {
-      'exercise_id': exerciseId,
-      'side': side.wire,
-      'fps': effectiveFps([for (final f in frames) f.timestampMs]),
-      'landmarks': [for (final f in frames) f.toNestedWorld()],
-      'visibility': [for (final f in frames) f.toVisibilityList()],
-    };
-    final body = await _post(path, payload);
+    final body = await _post(
+      path,
+      await _wire(exerciseId, side, frames),
+      offloadEncode: frames.length > _offloadAboveFrames,
+      // A whole set is a bigger body and a longer segmentation pass than a single repetition
+      timeout: frames.length > _offloadAboveFrames
+          ? const Duration(seconds: 60)
+          : null,
+    );
     return Assessment((body as Map).cast<String, dynamic>());
+  }
+
+  /// Uniformly thinning a window so it fits the service's frame cap
+  static List<PoseFrame> fitToCap(List<PoseFrame> frames, {int cap = 5400}) {
+    if (frames.length <= cap) return frames;
+    final stride = (frames.length / cap).ceil();
+    return [
+      for (var i = 0; i < frames.length; i += stride) frames[i],
+    ];
   }
 
 
@@ -275,13 +369,22 @@ class RehabApi {
     }
   }
 
-  Future<Object?> _post(String path, Object payload, {Duration? timeout}) async {
+  static const int _offloadAboveFrames = 400;
+
+  Future<Object?> _post(
+    String path,
+    Object payload, {
+    Duration? timeout,
+    bool offloadEncode = false,
+  }) async {
     try {
+      final encoded =
+          offloadEncode ? await compute(jsonEncode, payload) : jsonEncode(payload);
       final response = await _client
           .post(
             Uri.parse('$baseUrl$path'),
             headers: {'Content-Type': 'application/json'},
-            body: jsonEncode(payload),
+            body: encoded,
           )
           .timeout(timeout ?? _timeout);
       return _decode(response);

@@ -122,7 +122,7 @@ def phrase(
     that the coach ran degraded rather than presenting template text as generated
     """
     fallback = template_text(decision, exercise, last_session)
-    api_key = os.environ.get("GEMINI_API_KEY", "")
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         return fallback, "template", "GEMINI_API_KEY not set"
 

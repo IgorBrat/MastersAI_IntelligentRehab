@@ -77,6 +77,21 @@ class _ExerciseCard extends StatelessWidget {
   bool get _adjusted => (dose.romTarget - exercise.targetDeg).abs() > 0.01 ||
       dose.reps != exercise.defaultReps;
 
+  /// Sets already recorded today
+  int get _setsToday {
+    final now = DateTime.now();
+    var count = 0;
+    for (final session in state.historyFor(exercise.id)) {
+      final local = session.timestamp.toLocal();
+      if (local.year == now.year &&
+          local.month == now.month &&
+          local.day == now.day) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
   void _open(BuildContext context, Widget page) {
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
   }
@@ -106,6 +121,11 @@ class _ExerciseCard extends StatelessWidget {
                   highlight: _adjusted,
                 ),
                 _Chip(icon: Icons.repeat, label: '${dose.reps} повторень'),
+                _Chip(
+                  icon: Icons.layers,
+                  label: 'підхід ${_setsToday + 1} з ${dose.sets}',
+                  highlight: _setsToday >= dose.sets,
+                ),
                 _Chip(icon: Icons.videocam, label: exercise.requiredView),
                 if (sessions > 0)
                   _Chip(icon: Icons.history, label: '$sessions занять'),
@@ -132,7 +152,12 @@ class _ExerciseCard extends StatelessWidget {
                         exercise: exercise,
                         side: state.side,
                         romTarget: dose.romTarget,
+                        reps: dose.reps,
+                        setIndex: _setsToday + 1,
+                        sets: dose.sets,
                         onSessionComplete: state.addSession,
+                        onLabel: (record, label) =>
+                            state.labelSession(record, label: label),
                       ),
                     ),
                     icon: const Icon(Icons.videocam),
