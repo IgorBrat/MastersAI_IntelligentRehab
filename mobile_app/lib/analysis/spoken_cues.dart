@@ -1,6 +1,6 @@
 import 'package:flutter_tts/flutter_tts.dart';
 
-
+/// Anything that can speak a line; lets the throttle be tested without TTS
 abstract class CueSpeaker {
   Future<void> configure();
   Future<void> speak(String text);
@@ -22,6 +22,7 @@ class TtsSpeaker implements CueSpeaker {
       await _tts.setSpeechRate(rate);
       await _tts.awaitSpeakCompletion(true);
     } catch (_) {
+      // A missing uk-UA voice is not fatal; the on-screen cue remains
     }
   }
 
@@ -30,6 +31,7 @@ class TtsSpeaker implements CueSpeaker {
     try {
       await _tts.speak(text);
     } catch (_) {
+      // Speech failure never interrupts a set
     }
   }
 
@@ -41,7 +43,9 @@ class TtsSpeaker implements CueSpeaker {
   }
 }
 
-
+/// Speaking corrective cues, throttled so they stay intelligible.
+/// The same line is not repeated, a new line waits [minGap], and an urgent
+/// line skips both but waits [urgentMinGap] after the previous urgent one
 class SpokenCues {
   SpokenCues({
     CueSpeaker? speaker,
@@ -52,7 +56,6 @@ class SpokenCues {
 
   final CueSpeaker _speaker;
   final Duration minGap;
-
   final Duration urgentMinGap;
 
   bool enabled;
@@ -61,7 +64,7 @@ class SpokenCues {
   DateTime? _lastAt;
   DateTime? _lastUrgentAt;
 
-  /// Injected so tests do not depend on wall-clock time
+  /// Injectable clock for tests
   DateTime Function() now = DateTime.now;
 
   Future<void> init() => _speaker.configure();
@@ -84,6 +87,7 @@ class SpokenCues {
     return true;
   }
 
+  /// Forgetting the last line, so the next rep's first cue is spoken again
   void clearHistory() => _lastSpoken = null;
 
   Future<void> stop() => _speaker.stop();

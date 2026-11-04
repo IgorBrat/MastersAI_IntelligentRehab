@@ -1,0 +1,127 @@
+{
+  "format": "rehab-ml/thresholds@1",
+  "provenance": {
+    "corpus": "intellirehab",
+    "root": "..\\data\\IntelliRehabDS",
+    "self_paced": true,
+    "cohort": "patient",
+    "n_reference_repetitions": 782,
+    "n_subjects": 15,
+    "note": "Fitted across ALL subjects of this corpus, so it is not subject-disjoint. Valid for scoring new recordings; re-scoring this corpus with it is leakage."
+  },
+  "exercises": {
+    "elbow_flexion_extension": {
+      "n_reference": 127,
+      "percentiles": [
+        85.0,
+        95.0,
+        99.0
+      ],
+      "tolerances": {
+        "shoulder_hiking": [
+          0.0365,
+          0.0622,
+          0.116
+        ],
+        "trunk_forward_flexion": [
+          1.976,
+          2.9397,
+          3.6483
+        ],
+        "incomplete_return": [
+          20.2834,
+          33.6409,
+          42.8828
+        ],
+        "jerky_movement": [
+          0.2723,
+          0.4883,
+          0.815
+        ]
+      },
+      "skipped": {}
+    },
+    "shoulder_abduction_seated": {
+      "n_reference": 125,
+      "percentiles": [
+        85.0,
+        95.0,
+        99.0
+      ],
+      "tolerances": {
+        "trunk_lateral_lean": [
+          5.5267,
+          8.3725,
+          11.4334
+        ],
+        "shoulder_hiking": [
+          0.0726,
+          0.0969,
+          0.1492
+        ],
+        "elbow_flexion_synergy": [
+          15.9041,
+          38.109,
+          46.5896
+        ],
+        "out_of_plane_drift": [
+          39.3948,
+          61.095,
+          73.314
+        ],
+        "trunk_rotation": [
+          5.9152,
+          8.6791,
+          10.4149
+        ],
+        "incomplete_return": [
+          8.0221,
+          15.7623,
+          38.6682
+        ],
+        "jerky_movement": [
+          0.5135,
+          1.1296,
+          2.1422
+        ]
+      },
+      "skipped": {}
+    },
+    "shoulder_flexion_seated": {
+      "n_reference": 125,
+      "percentiles": [
+        85.0,
+        95.0,
+        99.0
+      ],
+      "tolerances": {
+        "trunk_forward_flexion": [
+          3.3776,
+          4.8441,
+          6.8094
+        ],
+        "shoulder_hiking": [
+          0.0392,
+          0.0731,
+          0.1244
+        ],
+        "elbow_flexion_synergy": [
+          37.0899,
+          45.6513,
+          54.7816
+        ],
+        "incomplete_return": [
+          13.5347,
+          23.6647,
+          31.4583
+        ],
+        "jerky_movement": [
+          0.259,
+          0.6809,
+          1.6625
+        ]
+      },
+      "skipped": {}
+    }
+  }
+}

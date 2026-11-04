@@ -4,6 +4,7 @@ import 'package:share_plus/share_plus.dart';
 import '../state/app_state.dart';
 import '../storage/local_store.dart';
 import '../storage/session_record.dart';
+import '../clinical/error_names.dart';
 
 /// Past sessions, newest first, from the phone's own store
 class HistoryScreen extends StatelessWidget {
@@ -11,8 +12,7 @@ class HistoryScreen extends StatelessWidget {
 
   final AppState state;
 
-  /// Exercise names, when the service is reachable. Falls back to the raw id: a stored
-  /// session must remain readable after the protocol is renamed or while offline
+  /// Exercise name, falling back to the raw id
   String _name(String exerciseId) {
     for (final e in state.exercises) {
       if (e.id == exerciseId) return e.nameUk;
@@ -20,13 +20,7 @@ class HistoryScreen extends StatelessWidget {
     return exerciseId;
   }
 
-  String _cue(String slug) {
-    for (final e in state.exercises) {
-      final text = e.watchedErrors[slug];
-      if (text != null && text.isNotEmpty) return text;
-    }
-    return slug;
-  }
+  String _cue(String slug) => errorNameUk(slug);
 
   @override
   Widget build(BuildContext context) {
@@ -75,6 +69,7 @@ class HistoryScreen extends StatelessWidget {
     );
   }
 
+  /// Sharing one bundle with the history, the profile and every recording
   Future<void> _export(BuildContext context) async {
     final messenger = ScaffoldMessenger.of(context);
     try {
@@ -136,7 +131,7 @@ class _Summary extends StatelessWidget {
         ? null
         : scored.map((s) => s.meanEqi!).reduce((a, b) => a + b) / scored.length;
 
-    // Trend over the last five scored sessions against the five before them
+    // Trend: recent half of scored sessions against the earlier half
     double? delta;
     if (scored.length >= 4) {
       final recent = scored.sublist(scored.length - (scored.length ~/ 2));
@@ -218,7 +213,7 @@ class _SessionTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
-    // A rejected recording is shown
+    // Rejected recordings still get a tile
     if (!session.usable) {
       return Card(
         child: ListTile(

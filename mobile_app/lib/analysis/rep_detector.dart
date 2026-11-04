@@ -10,8 +10,13 @@ class DetectedRep {
   });
 
   final int index;
+
+  /// When the movement started, not when the detector fired
   final int startMs;
+
+  /// When the arm returned to rest, or when the detector stopped waiting
   final int endMs;
+
   final double peakValue;
   final double baselineValue;
 
@@ -34,11 +39,16 @@ class RepDetector {
     this.baselineSeconds = 0.5,
   });
 
-  /// Prescribed excursion for the exercise, from the service's `/exercises`
+  /// Prescribed excursion for the exercise, degrees
   final double targetDeg;
 
+  /// Fraction of the excursion that starts a repetition
   final double riseFraction;
+
+  /// Fraction below which the descent counts as under way
   final double fallFraction;
+
+  /// Fraction of the excursion that bounds the resting band
   final double restFraction;
 
   final double minDurationSeconds;
@@ -46,8 +56,7 @@ class RepDetector {
   /// Force-emit after this long
   final double maxDurationSeconds;
 
-  /// How long to wait, once the descent is under way, for a return to the
-  /// resting band before emitting the repetition anyway
+  /// How long to wait during the descent for a return to rest before emitting
   final double settleSeconds;
 
   /// The resting pose is learned from this much of the start of the session
@@ -62,12 +71,16 @@ class RepDetector {
   /// Last time the angle was inside the resting band while not in a repetition
   int? _restingMs;
 
+  /// Last time the angle was below [fallFraction]; fallback start point
+  int? _lowMs;
+
   /// When the descent first crossed [fallFraction] during this repetition
   int? _fallCrossedMs;
 
-  /// Set when a repetition ended with the arm still up, and cleared when the
-  /// angle finally returns to the resting band
+  /// Set when a repetition ended with the arm still up, so holding it up
+  /// does not start a new repetition
   bool _awaitingRest = false;
+
   double _peak = double.negativeInfinity;
   int _completed = 0;
 
@@ -90,6 +103,7 @@ class RepDetector {
     _inRep = false;
     _repStartMs = 0;
     _restingMs = null;
+    _lowMs = null;
     _fallCrossedMs = null;
     _awaitingRest = false;
     _peak = double.negativeInfinity;
@@ -101,9 +115,7 @@ class RepDetector {
     _firstMs ??= timestampMs;
     _lastMs = timestampMs;
 
-    // Learn the baseline from the first half-second, taking the MINIMUM rather than the
-    // mean: if the patient starts lifting early the mean drifts upward and every
-    // subsequent excursion is underestimated
+    // Baseline is the minimum over the first half-second, robust to an early lift
     if (_baseline == null || calibrating) {
       _baseline = _baseline == null ? value : (value < _baseline! ? value : _baseline!);
       return null;
@@ -117,14 +129,18 @@ class RepDetector {
     final rest = _baseline! + restFraction * excursion;
 
     if (!_inRep) {
-      if (value <= rest) {
-        _restingMs = timestampMs;
+      if (value <= fall) {
+        // Release the guard below [fallFraction], since some patients rest above the baseline
         _awaitingRest = false;
+        _lowMs = timestampMs;
       }
+      if (value <= rest) _restingMs = timestampMs;
       if (!_awaitingRest && value >= rise) {
         _inRep = true;
-        _repStartMs = _restingMs ?? timestampMs;
+        // The movement began when the angle last left the low band
+        _repStartMs = _restingMs ?? _lowMs ?? timestampMs;
         _restingMs = null;
+        _lowMs = null;
         _fallCrossedMs = null;
         _peak = value;
       }
@@ -138,18 +154,18 @@ class RepDetector {
     final tooLong = elapsed >= (maxDurationSeconds * 1000).round();
 
     if (value <= rest) {
-      // A clean return to rest: the whole movement is in the window
+      // Clean return to rest
       if (longEnough) return _emit(timestampMs, returnedToRest: true);
     } else if (value <= fall) {
       _fallCrossedMs ??= timestampMs;
-      // The descent stalled above the resting band
+      // Descent stalled above rest: emit once settled so `incomplete_return` can grade it
       final settled =
           (timestampMs - _fallCrossedMs!) >= (settleSeconds * 1000).round();
       if (longEnough && settled) {
         return _emit(timestampMs, returnedToRest: false);
       }
     } else {
-      // Went back up: this is one repetition with a wobble, not two
+      // Went back up: one repetition with a wobble
       _fallCrossedMs = null;
     }
 
@@ -170,6 +186,7 @@ class RepDetector {
     _peak = double.negativeInfinity;
     _fallCrossedMs = null;
     _restingMs = null;
+    _lowMs = null;
     _awaitingRest = !returnedToRest;
     _completed += 1;
     return rep;

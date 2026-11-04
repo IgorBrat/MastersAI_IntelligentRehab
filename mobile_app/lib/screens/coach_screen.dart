@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../api/client.dart';
 import '../state/app_state.dart';
+import '../clinical/coach_text.dart';
+import '../clinical/error_names.dart';
 
 /// The adaptive coach: what to change next, and why
 class CoachScreen extends StatefulWidget {
@@ -39,10 +41,11 @@ class _CoachScreenState extends State<CoachScreen> {
       _advice = null;
       _applied = false;
     });
-    final api = RehabApi(state.profile.serviceUrl.trim());
+    final engine = state.engine;
+    if (engine == null) return;
     try {
       final dose = state.doseFor(exercise);
-      final advice = await api.coach(
+      final advice = await engine.coach(
         exerciseId: exercise.id,
         side: state.side,
         history: [
@@ -54,10 +57,9 @@ class _CoachScreenState extends State<CoachScreen> {
         unlocked: state.profile.unlocked,
       );
       if (mounted) setState(() => _advice = advice);
-    } on ApiException catch (e) {
-      if (mounted) setState(() => _error = e.message);
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
     } finally {
-      api.close();
       if (mounted) setState(() => _busy = false);
     }
   }
@@ -77,8 +79,8 @@ class _CoachScreenState extends State<CoachScreen> {
         child: Padding(
           padding: EdgeInsets.all(28),
           child: Text(
-            'Тренер потребує зв\'язку зі сервісом.\n\n'
-            'Рішення про навантаження ухвалює сервіс, а не телефон.',
+            'Модуль оцінювання не завантажився, тому тренер недоступний.\n\n'
+            'Рішення про навантаження ухвалює детермінований модуль адаптації.',
             textAlign: TextAlign.center,
           ),
         ),
@@ -149,8 +151,7 @@ class _CoachScreenState extends State<CoachScreen> {
   }
 }
 
-/// The coaching sentence. Labelled with its origin so template text is never passed off as
-/// generated, and a failed generation is visible rather than silent
+/// The coaching sentence, labelled as generated or template text
 class _MessageCard extends StatelessWidget {
   const _MessageCard({required this.advice});
 
@@ -193,7 +194,7 @@ class _MessageCard extends StatelessWidget {
   }
 }
 
-/// The dose. Rendered from the prescription, never from the text above it
+/// The dose, rendered from the prescription rather than the text
 class _DoseCard extends StatelessWidget {
   const _DoseCard({
     required this.advice,
@@ -307,8 +308,7 @@ class _Row extends StatelessWidget {
   }
 }
 
-/// The audit trail. Present because a dose change a patient cannot interrogate is a dose
-/// change they will not trust, and because a specialist reading the report needs it
+/// The rule and evidence behind the advice
 class _WhyCard extends StatelessWidget {
   const _WhyCard({required this.advice});
 
@@ -329,9 +329,9 @@ class _WhyCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Правило: ${advice.action}'),
+                Text('Правило: ${actionNameUk(advice.action)}'),
                 const SizedBox(height: 4),
-                Text(advice.reason),
+                Text(reasonUk(advice.action, evidence)),
                 const SizedBox(height: 10),
                 if (eqis is List)
                   Text('EQI за останні заняття: ${eqis.join(', ')}'),
@@ -339,8 +339,9 @@ class _WhyCard extends StatelessWidget {
                   Text('Зміна якості за підхід: '
                       '${evidence['mean_fatigue_trend']} EQI/повторення'),
                 if (evidence['worst_safety_error'] != null)
-                  Text('Помилка безпеки: ${evidence['worst_safety_error']} '
-                      '(${evidence['worst_safety_rate']})'),
+                  Text('Помилка безпеки: '
+                      '${errorNameUk('${evidence['worst_safety_error']}')} '
+                      '(${_percent(evidence['worst_safety_rate'])})'),
                 const SizedBox(height: 10),
                 Text(
                   'Потрібно ${evidence['sessions_required'] ?? '-'} занять поспіль, '
@@ -356,3 +357,7 @@ class _WhyCard extends StatelessWidget {
     );
   }
 }
+
+/// A firing rate (0..1) as a percentage, for the evidence block
+String _percent(Object? value) =>
+    value is num ? '${(value * 100).toStringAsFixed(0)} %' : '-';

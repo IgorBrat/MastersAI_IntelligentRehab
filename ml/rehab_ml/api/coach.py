@@ -94,7 +94,14 @@ def _call_gemini(prompt: str, api_key: str, model: str, timeout: float) -> str:
         data=json.dumps(
             {
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 500},
+                # Gemini 2.5 "thinking" tokens count against maxOutputTokens: at
+                # 500 the message was cut off after two lines. A templated
+                # rewording needs no reasoning, so thinking is switched off.
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "maxOutputTokens": 1024,
+                    "thinkingConfig": {"thinkingBudget": 0},
+                },
             }
         ).encode("utf-8"),
         headers={"Content-Type": "application/json"},
@@ -102,10 +109,15 @@ def _call_gemini(prompt: str, api_key: str, model: str, timeout: float) -> str:
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         payload = json.loads(response.read().decode("utf-8"))
-    parts = payload["candidates"][0]["content"]["parts"]
+    candidate = payload["candidates"][0]
+    parts = candidate["content"]["parts"]
     text = "".join(part.get("text", "") for part in parts).strip()
     if not text:
         raise ValueError("empty generation")
+    # A message cut off mid-sentence is worse than the template: never return one
+    finish = candidate.get("finishReason")
+    if finish not in (None, "STOP"):
+        raise ValueError(f"generation ended with {finish}")
     return text
 
 

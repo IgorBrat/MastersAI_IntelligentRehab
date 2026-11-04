@@ -19,8 +19,7 @@ class VideoScreen extends StatefulWidget {
   final ExerciseInfo exercise;
   final BodySide side;
 
-  /// Called once with the scored clip so the caller can persist it. A clip scored from the
-  /// server counts as a session: it is the same pipeline on the same protocol
+  /// Called once with the scored clip, which is stored as a session
   final Future<void> Function(SessionRecord)? onSessionComplete;
 
   @override

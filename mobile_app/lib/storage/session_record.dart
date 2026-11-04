@@ -1,6 +1,5 @@
-/// What a supervising specialist judged of a recorded set
+/// A supervising specialist's verdict on a recorded set, the pilot's reference label
 enum SupervisorLabel {
-  /// Nobody has judged this set
   none('none'),
   correct('correct'),
   incorrect('incorrect');
@@ -56,13 +55,12 @@ class SessionRecord {
 
   final String? rejectionUk;
 
-  /// The supervising specialist's judgement, when one has been given
   final SupervisorLabel label;
 
   /// Free text from whoever labelled it
   final String note;
 
-  /// Name of the stored raw-landmark file, when the recording was kept
+  /// Stored raw-landmark file name, or null if the recording was not kept
   final String? recordingId;
 
   SessionRecord copyWith({
@@ -86,7 +84,7 @@ class SessionRecord {
         recordingId: recordingId ?? this.recordingId,
       );
 
-  /// Building from an `/assess/session` response body
+  /// Builds from a session assessment body
   factory SessionRecord.fromAssessment(
     String exerciseId,
     Map<String, dynamic> body, {
@@ -151,7 +149,7 @@ class SessionRecord {
         'recording_id': recordingId,
       };
 
-  /// The subset `/coach` accepts. Rejected sessions are sent too
+  /// Fields the coach uses. [label] is left out so the dose depends only on measurements
   Map<String, dynamic> toCoachJson() => {
         'exercise_id': exerciseId,
         'timestamp': timestamp.toIso8601String(),

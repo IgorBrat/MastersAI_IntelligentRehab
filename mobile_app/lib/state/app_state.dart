@@ -2,10 +2,11 @@ import 'package:flutter/foundation.dart';
 
 import '../analysis/live_angles.dart';
 import '../api/client.dart';
+import '../scoring/rehab_engine.dart';
 import '../storage/local_store.dart';
 import '../storage/session_record.dart';
 
-/// Everything the four pages share: the profile, the stored history, the connection
+/// Shared app state: profile, stored history and the scoring engine
 class AppState extends ChangeNotifier {
   Profile _profile = const Profile();
   List<SessionRecord> _history = const [];
@@ -14,6 +15,10 @@ class AppState extends ChangeNotifier {
   bool _loading = true;
   String? _connectionError;
   Map<String, dynamic>? _serviceInfo;
+  RehabEngine? _engine;
+
+  /// The on-device scoring engine, once its assets have loaded
+  RehabEngine? get engine => _engine;
 
   Profile get profile => _profile;
   List<SessionRecord> get history => _history;
@@ -22,7 +27,11 @@ class AppState extends ChangeNotifier {
   String? get connectionError => _connectionError;
   Map<String, dynamic>? get serviceInfo => _serviceInfo;
 
-  bool get connected => _exercises.isNotEmpty && _connectionError == null;
+  /// Whether the on-device engine and its assets are loaded
+  bool get connected => _engine != null && _exercises.isNotEmpty && _connectionError == null;
+
+  /// Whether the optional laptop video service is configured
+  bool get hasVideoService => _profile.serviceUrl.trim().isNotEmpty;
 
   BodySide get side =>
       _profile.side == 'right' ? BodySide.right : BodySide.left;
@@ -53,35 +62,26 @@ class AppState extends ChangeNotifier {
     _history = await LocalStore.history();
     _loading = false;
     notifyListeners();
-    if (_profile.serviceUrl.trim().isNotEmpty) {
-      await connect();
-    }
+    await connect();
   }
 
-  /// Fetching the protocol from the service
+  /// Loads the bundled protocol, thresholds and model
   Future<void> connect() async {
-    final url = _profile.serviceUrl.trim();
-    if (url.isEmpty) {
-      _connectionError = 'Адреса сервісу не вказана';
-      notifyListeners();
-      return;
-    }
-    final api = RehabApi(url);
     try {
-      _serviceInfo = await api.health();
-      _exercises = await api.exercises();
+      final engine = _engine ?? await RehabEngine.load();
+      _engine = engine;
+      _serviceInfo = engine.health();
+      _exercises = engine.exercises();
       _connectionError = null;
-      // First run: seed the progression with its first exercise so the patient has
-      // something to do before the coach has any history to reason about
+      // First run: unlock the first exercise of the progression
       if (_profile.unlocked.isEmpty && _exercises.isNotEmpty) {
         await saveProfile(_profile.copyWith(unlocked: [_exercises.first.id]));
         return;
       }
-    } on ApiException catch (e) {
-      _connectionError = e.message;
+    } catch (e) {
+      _connectionError = 'Не вдалося завантажити модуль оцінювання: $e';
       _exercises = const [];
     } finally {
-      api.close();
       notifyListeners();
     }
   }
@@ -104,7 +104,7 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Recording a supervising specialist's verdict on one stored set
+  /// Stores a supervising specialist's verdict on one set; the coach never sees it
   Future<void> labelSession(
     SessionRecord session, {
     required SupervisorLabel label,
@@ -116,13 +116,13 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Criteria the service has switched off, by slug
+  /// Criteria switched off for this sensor, by slug
   List<String> get excludedCriteria => [
         for (final slug in (_serviceInfo?['excluded_criteria'] as List? ?? []))
           slug.toString(),
       ];
 
-  /// Applying a coach decision: store the new dose and any unlocked exercise
+  /// Applies a coach decision: stores the new dose and any unlocked exercise
   Future<void> applyAdvice(String exerciseId, CoachAdvice advice) async {
     final doses = Map<String, Dose>.from(_profile.doses);
     doses[exerciseId] = Dose(

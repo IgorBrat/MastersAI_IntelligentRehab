@@ -4,9 +4,9 @@ import 'package:flutter/material.dart';
 
 import '../api/client.dart';
 import '../storage/session_record.dart';
+import '../clinical/error_names.dart';
 
-/// Session report. Everything shown here came from the service's rule engine - the
-/// on-device cues during recording play no part in the score
+/// Session report from the scoring engine; live cues play no part in the score
 class SummaryScreen extends StatelessWidget {
   const SummaryScreen({
     super.key,
@@ -20,7 +20,7 @@ class SummaryScreen extends StatelessWidget {
   final Assessment session;
   final ExerciseInfo exercise;
 
-  /// Sets still due today, so the screen can offer the rest before the next one
+  /// Sets still due today
   final int setsRemaining;
 
   /// The stored session, when there is one to label
@@ -91,11 +91,11 @@ class SummaryScreen extends StatelessWidget {
             const SizedBox(height: 18),
             Text('Що виправити', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
-            // Ordered by how often it happened, not by worst single repetition
+            // Ordered by frequency
             for (final entry in frequency)
               Card(
                 child: ListTile(
-                  title: Text(exercise.watchedErrors[entry.key] ?? entry.key),
+                  title: Text(errorNameUk(entry.key)),
                   trailing: Text('${(entry.value * 100).toStringAsFixed(0)}%'),
                 ),
               ),
@@ -110,7 +110,7 @@ class SummaryScreen extends StatelessWidget {
               title: Text('EQI ${reps[i].eqi?.toStringAsFixed(0) ?? '-'}'),
               subtitle: reps[i].errors.isEmpty
                   ? const Text('без помилок')
-                  : Text(reps[i].errors.keys.join(', ')),
+                  : Text(reps[i].errors.keys.map(errorNameUk).join(', ')),
             ),
           if (record != null && onLabel != null) ...[
             const SizedBox(height: 18),
@@ -137,7 +137,8 @@ class SummaryScreen extends StatelessWidget {
   }
 }
 
-/// The supervising specialist's verdict on the set just recorded
+/// The supervisor's verdict on the set, stored as a reference label and never
+/// passed to the coach
 class _LabelCard extends StatelessWidget {
   const _LabelCard({required this.record, required this.onLabel});
 
@@ -198,7 +199,7 @@ class _LabelCard extends StatelessWidget {
   }
 }
 
-/// The rest before the next set
+/// Rest countdown before the next set
 class _RestCard extends StatefulWidget {
   const _RestCard({required this.setsRemaining});
 

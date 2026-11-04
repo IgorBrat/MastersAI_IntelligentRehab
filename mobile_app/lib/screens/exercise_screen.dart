@@ -77,7 +77,7 @@ class _ExerciseCard extends StatelessWidget {
   bool get _adjusted => (dose.romTarget - exercise.targetDeg).abs() > 0.01 ||
       dose.reps != exercise.defaultReps;
 
-  /// Sets already recorded today
+  /// Sets recorded today; one set is one stored session
   int get _setsToday {
     final now = DateTime.now();
     var count = 0;
@@ -148,7 +148,7 @@ class _ExerciseCard extends StatelessWidget {
                     onPressed: () => _open(
                       context,
                       RecordScreen(
-                        baseUrl: state.profile.serviceUrl.trim(),
+                        engine: state.engine!,
                         exercise: exercise,
                         side: state.side,
                         romTarget: dose.romTarget,
@@ -167,7 +167,8 @@ class _ExerciseCard extends StatelessWidget {
                 const SizedBox(width: 10),
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: () => _open(
+                    // Video scoring needs the laptop service for pose estimation
+                    onPressed: !state.hasVideoService ? null : () => _open(
                       context,
                       VideoScreen(
                         baseUrl: state.profile.serviceUrl.trim(),
@@ -209,7 +210,7 @@ class _Chip extends StatelessWidget {
   }
 }
 
-/// Shown instead of the exercise list when the service is unreachable
+/// Shown instead of the exercise list when the scoring engine failed to load
 class _NotConnected extends StatelessWidget {
   const _NotConnected({required this.state});
 
@@ -218,25 +219,22 @@ class _NotConnected extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final noUrl = state.profile.serviceUrl.trim().isEmpty;
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(28),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.cloud_off, size: 56, color: scheme.error),
+            Icon(Icons.error_outline, size: 56, color: scheme.error),
             const SizedBox(height: 16),
             Text(
-              noUrl ? 'Сервіс не налаштовано' : 'Немає зв\'язку зі сервісом',
+              'Модуль оцінювання недоступний',
               style: Theme.of(context).textTheme.titleMedium,
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
             Text(
-              noUrl
-                  ? 'Вкажіть LAN-адресу ноутбука у вкладці «Профіль».'
-                  : state.connectionError ?? '',
+              state.connectionError ?? '',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodySmall,
             ),
@@ -248,7 +246,7 @@ class _NotConnected extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             const Text(
-              'Історія та профіль працюють без зв\'язку.',
+              'Історія та профіль доступні й без нього.',
               style: TextStyle(fontSize: 12),
             ),
           ],

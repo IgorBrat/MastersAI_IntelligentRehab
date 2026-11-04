@@ -68,11 +68,7 @@ V3 projectOntoPlane(V3 v, V3 normal) {
 double angleBetween(V3 a, V3 b) =>
     _degrees(math.atan2(a.cross(b).length, a.dot(b)));
 
-/// Angle from [a] to [b], signed by the right-hand rule about [normal]
-///
-/// `geometry.signed_angle`. Using atan2 of the cross and dot terms rather than
-/// acos of the dot: acos loses the sign, and the sign is the whole point for
-/// flexion and for trunk lean.
+/// Signed angle from [a] to [b] about [normal], degrees. `geometry.signed_angle`
 double signedAngle(V3 a, V3 b, V3 normal) {
   final n = normal.unit;
   return _degrees(math.atan2(a.cross(b).dot(n), a.dot(b)));
@@ -80,11 +76,7 @@ double signedAngle(V3 a, V3 b, V3 normal) {
 
 double _degrees(double radians) => radians * 180.0 / math.pi;
 
-/// Per-frame anatomical basis attached to the pelvis and trunk
-///
-/// A Dart port of `features/geometry.py:BodyFrame`. Angles measured in this
-/// frame are the same whether the patient sits square to the phone or 20 deg off
-/// axis, which is the property the whole measurement design rests on.
+/// Per-frame anatomical basis of pelvis and trunk. Port of `geometry.BodyFrame`
 class BodyFrame {
   BodyFrame._({
     required this.lateral,
@@ -116,12 +108,7 @@ class BodyFrame {
   V3 get down => -longitudinal;
 }
 
-/// Which pair of numbers to derive for the exercise in progress
-///
-/// The primary channel comes from the service's `/exercises`, so this follows
-/// the protocol rather than restating it. Before this existed the screen always
-/// computed shoulder abduction, whatever exercise was running -- correct only
-/// for one of the six.
+/// Live channel for the exercise, chosen from its primary channel
 enum LiveChannel {
   shoulderFlexion,
   shoulderAbduction,
@@ -137,9 +124,7 @@ enum LiveChannel {
       case 'elbow_flexion':
         return LiveChannel.elbowFlexion;
       default:
-        // hand_up, hand_forward and shoulder_rotation are not derived on device.
-        // Elevation is the honest fallback: it is the excursion the patient is
-        // being asked for in every raise, just not the plane-resolved one.
+        // Channels not derived live fall back to plain arm elevation
         return LiveChannel.shoulderElevation;
     }
   }
@@ -161,54 +146,48 @@ enum LiveChannel {
       };
 }
 
-/// The two scalars computed on-device, for the exercise in progress
-///
-/// #### Why anything is computed in Dart at all
-/// Intra-repetition cueing has a hard latency budget: a "straighten up" prompt
-/// is useless if it arrives 200 ms after the lean. A network round trip per
-/// frame cannot meet that, so these two numbers are derived locally.
-///
-/// #### Why only two
-/// The full pipeline is 14 angle channels, Butterworth filtering, SPARC over an
-/// FFT, and eleven graded criteria. These two drive *cues* only. Every **score**
-/// comes from the service, which runs the real pipeline. If the two ever
-/// disagree, the service is right.
-///
-/// #### How close they are to the service's numbers
-/// The geometry is a faithful port: same anatomical frame, same signed-angle
-/// convention, same gravity reference. What is missing is everything
-/// `pose.normalize.preprocess` does first -- gap filling, the zero-phase
-/// Butterworth, rigid bone lengths. Those cannot run causally, so the on-device
-/// value is the unfiltered one and differs by the noise the filter would have
-/// removed.
+/// Unfiltered per-frame angles for live cues only; scores come from `scoring/`
 class LiveAngles {
   const LiveAngles({
     required this.channel,
     required this.primaryDeg,
     required this.compensationDeg,
+    this.elevationDeg = 0.0,
+    this.girdleHeightTl = 0.0,
   });
 
   final LiveChannel channel;
 
-  /// The excursion the repetition is counted on, in the channel's own convention
+  /// Excursion the repetition is counted on, degrees
   final double primaryDeg;
 
-  /// The compensation this exercise watches, in degrees away from upright
-  ///
-  /// Trunk FORWARD flexion for the sagittal exercises, trunk LATERAL tilt for
-  /// the frontal ones. Reported as a magnitude: the scored criteria are
-  /// direction-aware, this is a cue and a lean either way is worth saying.
+  /// Trunk lean magnitude, degrees: forward for sagittal, lateral for frontal
   final double compensationDeg;
 
-  /// Deriving both from one frame's world landmarks
+  /// Humeral elevation from the hanging position, degrees
+  final double elevationDeg;
+
+  /// Shoulder height above the pelvis, torso lengths. `shoulder_height_working`
+  final double girdleHeightTl;
+
+  /// Shoulder hike above [baselineTl] minus the obligatory scapular rise.
+  /// `AngleSeries.shoulder_hike`
+  double girdleHikeTl(double baselineTl) =>
+      girdleHeightTl -
+      baselineTl -
+      scapulohumeralRisePerDeg * math.max(0.0, elevationDeg - scapulohumeralOnsetDeg);
+
+  /// `features.angles.SCAPULOHUMERAL_RISE_PER_DEG` and its onset
+  static const double scapulohumeralRisePerDeg = 0.00071;
+  static const double scapulohumeralOnsetDeg = 30.0;
+
+  /// Computes the angles from one frame's world landmarks
   static LiveAngles fromFrame(
     PoseFrame frame,
     BodySide side, {
     LiveChannel channel = LiveChannel.shoulderAbduction,
   }) {
-    // MediaPipe world landmarks are metres with y pointing DOWN and z away from
-    // the camera. `pose.mediapipe_estimator.landmarks_to_canonical` remaps them
-    // to (x, -y, -z), and every formula below assumes it has been done.
+    // MediaPipe y is down, z away from camera; remap to canonical (x, -y, -z)
     V3 at(int i) {
       final (x, y, z) = frame.point(i);
       return V3(x, -y, -z);
@@ -219,7 +198,7 @@ class LiveAngles {
     final lShoulder = at(Mp.lShoulder);
     final rShoulder = at(Mp.rShoulder);
 
-    // Synthesised exactly as landmarks_to_canonical does
+    // Same as `landmarks_to_canonical`
     final pelvis = lHip.mid(rHip);
     final neck = lShoulder.mid(rShoulder);
 
@@ -250,7 +229,7 @@ class LiveAngles {
         180.0 - angleBetween(shoulder - elbow, wrist - elbow),
     };
 
-    // Trunk posture is measured against GRAVITY in a pelvis-attached frame
+    // Trunk lean is measured against gravity in a pelvis frame, not the trunk frame
     final pelvisLateral = projectOntoPlane(lHip - rHip, V3.up).unit;
     final pelvisAnterior = pelvisLateral.cross(V3.up).unit;
     final trunkAxis = body.longitudinal;
@@ -273,15 +252,18 @@ class LiveAngles {
       LiveChannel.shoulderElevation => trunkTilt.abs(),
     };
 
+    final torso = (neck - pelvis).length;
     return LiveAngles(
       channel: channel,
       primaryDeg: primary,
       compensationDeg: compensation,
+      elevationDeg: angleBetween(humerus, body.down),
+      girdleHeightTl: torso > 1e-6 ? (shoulder - pelvis).dot(body.longitudinal) / torso : 0.0,
     );
   }
 }
 
-/// Exponential smoothing, so the gauge and the cues do not flicker on jitter
+/// Causal exponential smoothing so the gauge and cues do not flicker
 class Smoother {
   Smoother({this.alpha = 0.35});
 

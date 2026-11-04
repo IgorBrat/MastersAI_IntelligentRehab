@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../state/app_state.dart';
 
-
+/// Patient profile, affected side and scoring status
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key, required this.state});
 
@@ -67,9 +67,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _changeSide(String next) async {
-    // Changing the affected side mid-programme makes previously stored sessions
-    // incomparable: they measured the other arm. Say so rather than silently letting the
-    // history mix two limbs.
+    // Warn before switching arms: stored sessions measured the other one
     if (state.history.isNotEmpty && next != state.profile.side) {
       final confirmed = await showDialog<bool>(
         context: context,
@@ -149,20 +147,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
           onSelectionChanged: (s) => _changeSide(s.first),
         ),
         const SizedBox(height: 22),
-        Text('Сервіс', style: Theme.of(context).textTheme.titleMedium),
+        Text('Оцінювання', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 10),
-        TextField(
-          controller: _url,
-          decoration: const InputDecoration(
-            labelText: 'Адреса',
-            helperText: 'LAN-адреса ноутбука, напр. http://192.168.0.10:8000 - не localhost',
-            helperMaxLines: 2,
-            border: OutlineInputBorder(),
-          ),
-          keyboardType: TextInputType.url,
-          autocorrect: false,
-        ),
-        const SizedBox(height: 12),
         if (_checking)
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 8),
@@ -170,17 +156,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
           )
         else if (state.connected)
           _Status(
-            icon: Icons.cloud_done,
+            icon: Icons.phone_android,
             colour: scheme.primary,
-            title: 'Підключено - ${state.exercises.length} вправ у протоколі',
-            // Which thresholds are in force changes what the same movement scores, so a
-            // stored report is uninterpretable without it.
+            title: 'На пристрої - ${state.exercises.length} вправ у протоколі',
+            // The active thresholds change what a movement scores
             subtitle: info == null
                 ? null
-                : 'Пороги: ${info['thresholds'] != null ? 'каліброовані' : 'протокольні'}'
+                : 'Пороги: ${info['thresholds'] != null ? 'калібровані' : 'протокольні'}'
                     ' · вільний темп: ${info['self_paced'] == true ? 'так' : 'ні'}'
-                    '${info['model'] != null ? ' · модель: так' : ''}',
+                    ' · модель: ${info['model'] != null ? 'так' : 'ні'}',
           ),
+        // Excluded criteria never fire, so list them explicitly
         if (state.excludedCriteria.isNotEmpty)
           _Status(
             icon: Icons.rule,
@@ -191,11 +177,31 @@ class _ProfileScreenState extends State<ProfileScreen> {
           )
         else
           _Status(
-            icon: Icons.cloud_off,
+            icon: Icons.error_outline,
             colour: scheme.error,
-            title: 'Немає зв\'язку',
+            title: state.connected ? 'Усі критерії увімкнено' : 'Модуль оцінювання недоступний',
             subtitle: state.connectionError,
           ),
+        const SizedBox(height: 22),
+        Text('Тестові відео (необов\'язково)', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 4),
+        Text(
+          'Лише для оцінювання записів, збережених на ноутбуці: їх обробляє сервіс '
+          'rehab-ml. Для занять із камерою адреса не потрібна.',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _url,
+          decoration: const InputDecoration(
+            labelText: 'Адреса сервісу',
+            helperText: 'LAN-адреса ноутбука, напр. http://192.168.0.10:8000 - не localhost',
+            helperMaxLines: 2,
+            border: OutlineInputBorder(),
+          ),
+          keyboardType: TextInputType.url,
+          autocorrect: false,
+        ),
         const SizedBox(height: 20),
         FilledButton.icon(
           onPressed: _dirty ? () => _save() : null,

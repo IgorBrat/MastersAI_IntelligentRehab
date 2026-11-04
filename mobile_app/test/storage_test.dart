@@ -45,7 +45,7 @@ void main() {
       expect(built.errorFrequency, {'trunk_lateral_lean': 0.33});
     });
 
-    /// a rejected recording has null aggregates
+    /// A rejected recording has null aggregates
     test('handles a rejected session', () {
       final rejected = SessionRecord.fromAssessment('shoulder_flexion_seated', {
         'usable': false,
@@ -83,6 +83,53 @@ void main() {
       ]) {
         expect(payload.containsKey(key), isTrue, reason: key);
       }
+    });
+
+    /// The coach depends only on measurements, so doses are reproducible
+    test('the coach payload does NOT carry the supervisor label', () {
+      final labelled = record.copyWith(
+        label: SupervisorLabel.incorrect,
+        note: 'leaned forward on the last three',
+      );
+      final payload = labelled.toCoachJson();
+      expect(payload.containsKey('label'), isFalse);
+      expect(payload.containsKey('note'), isFalse);
+    });
+
+    test('the supervisor label and recording id survive a round trip', () {
+      final labelled = record.copyWith(
+        label: SupervisorLabel.correct,
+        note: 'clean',
+        recordingId: 'shoulder_flexion_seated_2026-09-16T10-00-00.json',
+      );
+      final restored = SessionRecord.fromJson(labelled.toJson());
+      expect(restored.label, SupervisorLabel.correct);
+      expect(restored.note, 'clean');
+      expect(restored.recordingId, labelled.recordingId);
+    });
+
+    test('a session stored before labelling existed still reads', () {
+      // Old rows have no label, note or recording_id keys
+      final restored = SessionRecord.fromJson({
+        'exercise_id': 'shoulder_flexion_seated',
+        'timestamp': '2026-09-01T10:00:00.000',
+        'usable': true,
+        'mean_eqi': 80.0,
+        'n_reps': 8,
+      });
+      expect(restored.label, SupervisorLabel.none);
+      expect(restored.note, '');
+      expect(restored.recordingId, isNull);
+    });
+
+    test('an unrecognised label value degrades to none', () {
+      final restored = SessionRecord.fromJson({
+        'exercise_id': 'x',
+        'timestamp': '2026-09-01T10:00:00.000',
+        'usable': true,
+        'label': 'maybe',
+      });
+      expect(restored.label, SupervisorLabel.none);
     });
   });
 

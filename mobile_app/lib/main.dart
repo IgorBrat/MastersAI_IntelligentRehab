@@ -5,7 +5,7 @@ import 'screens/home_shell.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  // Portrait only
+  // Portrait only, so a mid-set rotation cannot change the angle coordinate frame
   SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,

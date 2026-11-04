@@ -7,7 +7,7 @@ import '../analysis/live_angles.dart';
 import '../analysis/rep_detector.dart' show effectiveFps;
 import '../pose/pose_stream.dart';
 
-/// What the service knows about an exercise. Mirrors `api.schemas.ExerciseInfo`
+/// Protocol data for an exercise. Mirrors `api.schemas.ExerciseInfo`
 class ExerciseInfo {
   ExerciseInfo({
     required this.id,
@@ -17,6 +17,8 @@ class ExerciseInfo {
     required this.targetDeg,
     required this.ceilingDeg,
     required this.holdSeconds,
+    this.concentricSeconds = 0.0,
+    this.eccentricSeconds = 0.0,
     required this.defaultReps,
     required this.instructionsUk,
     required this.watchedErrors,
@@ -31,11 +33,15 @@ class ExerciseInfo {
 
   final double targetDeg;
 
-  /// Upper bound of the therapist's envelope - the highest target adaptive progression would ever set
+  /// Highest target adaptive progression may set
   final double ceilingDeg;
 
-  /// Prescribed end-range hold, seconds
+  /// Prescribed end-range hold, seconds; zero means self-paced
   final double holdSeconds;
+
+  /// Prescribed lifting and lowering time, seconds
+  final double concentricSeconds;
+  final double eccentricSeconds;
 
   final int defaultReps;
   final String instructionsUk;
@@ -49,10 +55,12 @@ class ExerciseInfo {
         requiredView: json['required_view'] as String,
         primaryChannel: json['primary_channel'] as String? ?? 'shoulder_elevation',
         targetDeg: (json['target_deg'] as num).toDouble(),
-        // Fall back to the target rather than to zero
+        // Missing ceiling falls back to 1.5x the target
         ceilingDeg: (json['ceiling_deg'] as num?)?.toDouble() ??
             (json['target_deg'] as num).toDouble() * 1.5,
         holdSeconds: (json['hold_s'] as num?)?.toDouble() ?? 0.0,
+        concentricSeconds: (json['concentric_s'] as num?)?.toDouble() ?? 0.0,
+        eccentricSeconds: (json['eccentric_s'] as num?)?.toDouble() ?? 0.0,
         defaultReps: (json['default_reps'] as num).toInt(),
         instructionsUk: json['instructions_uk'] as String? ?? '',
         watchedErrors: {
@@ -92,7 +100,7 @@ class Assessment {
       ];
 }
 
-/// Whether the camera is placed well enough to start a set
+/// Whether the camera framing is good enough to start. Mirrors `api.schemas.ReadinessInfo`
 class Readiness {
   Readiness({
     required this.ready,
@@ -131,7 +139,7 @@ class Readiness {
       );
 }
 
-/// One pre-recorded clip the service offers for scoring
+/// One pre-recorded clip stored on the laptop
 class VideoInfo {
   VideoInfo({required this.name, required this.relativePath, required this.sizeMb});
 
@@ -147,7 +155,7 @@ class VideoInfo {
 }
 
 
-/// A progression decision from `/coach`, with its Ukrainian phrasing
+/// A progression decision from the coach, with its Ukrainian phrasing
 class CoachAdvice {
   CoachAdvice({
     required this.action,
@@ -168,8 +176,7 @@ class CoachAdvice {
   final bool changed;
   final String textUk;
 
-  /// 'gemini' or 'template'. Surfaced so the app can say the coach ran degraded rather than
-  /// presenting template text as generated
+  /// 'gemini' or 'template'
   final String textSource;
   final String? textError;
 
@@ -208,7 +215,7 @@ class ApiException implements Exception {
   String toString() => message;
 }
 
-/// Client for the rehab-ml service
+/// Client for the rehab-ml service, used only for the laptop video mode
 class RehabApi {
   RehabApi(this.baseUrl, {http.Client? client})
       : _client = client ?? http.Client();
@@ -223,7 +230,7 @@ class RehabApi {
     return (body as Map).cast<String, dynamic>();
   }
 
-  /// The wire body for a window, exposed so a recording can be stored verbatim
+  /// Wire body for a window, so a recording can be stored and re-scored as is
   Future<Map<String, Object>> recordingPayload({
     required String exerciseId,
     required BodySide side,
@@ -238,7 +245,7 @@ class RehabApi {
     ];
   }
 
-  /// Clips the service can score, if it was started with a video directory
+  /// Clips in the service's video directory, if it has one
   Future<List<VideoInfo>> videos() async {
     final body = await _get('/videos') as List;
     return [
@@ -246,7 +253,7 @@ class RehabApi {
     ];
   }
 
-  /// Scoring a clip that lives on the SERVER, not on the phone
+  /// Assesses a clip stored on the laptop, not on the phone
   Future<Assessment> assessVideo({
     required String exerciseId,
     required BodySide side,
@@ -264,7 +271,7 @@ class RehabApi {
     return Assessment((body as Map).cast<String, dynamic>());
   }
 
-  /// Asking whether the framing is good enough to start, before the patient does
+  /// Checks the framing before the set starts
   Future<Readiness> checkReadiness({
     required String exerciseId,
     required BodySide side,
@@ -275,7 +282,7 @@ class RehabApi {
     return Readiness.fromJson((body as Map).cast<String, dynamic>());
   }
 
-  /// Scoring one already-segmented repetition - the live path
+  /// Posts one already-segmented repetition
   Future<Assessment> assessRepetition({
     required String exerciseId,
     required BodySide side,
@@ -283,7 +290,7 @@ class RehabApi {
   }) =>
       _assess('/assess/repetition', exerciseId, side, frames);
 
-  /// Scoring a whole set. The service segments it into repetitions itself
+  /// Posts a whole set, segmented into repetitions on the other side
   Future<Assessment> assessSession({
     required String exerciseId,
     required BodySide side,
@@ -291,7 +298,7 @@ class RehabApi {
   }) =>
       _assess('/assess/session', exerciseId, side, frames);
 
-  /// Building the wire body for a window of frames
+  /// Builds the wire body. The frame rate is measured from the timestamps, never assumed
   Future<Map<String, Object>> _wire(
     String exerciseId,
     BodySide side,
@@ -317,7 +324,7 @@ class RehabApi {
       path,
       await _wire(exerciseId, side, frames),
       offloadEncode: frames.length > _offloadAboveFrames,
-      // A whole set is a bigger body and a longer segmentation pass than a single repetition
+      // Whole sets take longer than single repetitions
       timeout: frames.length > _offloadAboveFrames
           ? const Duration(seconds: 60)
           : null,
@@ -325,7 +332,7 @@ class RehabApi {
     return Assessment((body as Map).cast<String, dynamic>());
   }
 
-  /// Uniformly thinning a window so it fits the service's frame cap
+  /// Uniformly thins a window to fit `api.schemas.MAX_FRAMES`, keeping the tail
   static List<PoseFrame> fitToCap(List<PoseFrame> frames, {int cap = 5400}) {
     if (frames.length <= cap) return frames;
     final stride = (frames.length / cap).ceil();
@@ -335,7 +342,7 @@ class RehabApi {
   }
 
 
-  /// Asking for the next dose, given the phone's stored history
+  /// Requests the next dose from the stored history
   Future<CoachAdvice> coach({
     required String exerciseId,
     required BodySide side,
@@ -369,6 +376,7 @@ class RehabApi {
     }
   }
 
+  /// Above this many frames, JSON is encoded off the UI isolate
   static const int _offloadAboveFrames = 400;
 
   Future<Object?> _post(

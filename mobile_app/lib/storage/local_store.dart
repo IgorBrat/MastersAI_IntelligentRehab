@@ -61,7 +61,7 @@ class LocalStore {
 
   static Future<void> clearHistory() => _writeJson(_historyFile, const []);
 
-  /// Replacing one stored session, matched on its timestamp
+  /// Replaces one stored session, matched on its timestamp
   static Future<void> updateSession(SessionRecord updated) async {
     final all = await history();
     final out = [
@@ -89,7 +89,8 @@ class LocalStore {
     return out;
   }
 
-  /// Storing the raw landmark payload a session was scored from
+  /// Stores the raw landmark payload so the session can be re-scored later.
+  /// Written to a temp file and renamed, so a crash cannot leave a partial file
   static Future<String> saveRecording(
     String exerciseId,
     DateTime at,
@@ -126,7 +127,7 @@ class LocalStore {
     return await file.exists() ? file : null;
   }
 
-  /// Writing one file holding the history, the profile and every recording
+  /// Writes one export file with the history, the profile and every recording
   static Future<File> exportBundle() async {
     final dir = await getApplicationDocumentsDirectory();
     final stored = await history();
@@ -137,7 +138,7 @@ class LocalStore {
       try {
         payloads[entry.id] = jsonDecode(await file.readAsString());
       } catch (_) {
-        // A corrupt recording must not cost the export everything else
+        // Mark a corrupt recording and keep exporting the rest
         payloads[entry.id] = {'error': 'unreadable'};
       }
     }
@@ -177,10 +178,10 @@ class Profile {
 
   final String serviceUrl;
 
-  /// exercise_id -> current dose, as returned by `/coach`
+  /// exercise_id -> current dose set by the coach
   final Map<String, Dose> doses;
 
-  /// Exercises the coach has already unlocked, so it does not offer one twice
+  /// Exercises the coach has already unlocked
   final List<String> unlocked;
 
   Profile copyWith({

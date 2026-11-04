@@ -35,7 +35,7 @@ class PoseFrame {
   (double, double, double) point(int i) =>
       (world[i * 3], world[i * 3 + 1], world[i * 3 + 2]);
 
-  /// Nested (33, 3) form, which is what the service's wire format expects
+  /// Nested (33, 3) form used by the wire format
   List<List<double>> toNestedWorld() => List.generate(
         landmarkCount,
         (i) => [world[i * 3], world[i * 3 + 1], world[i * 3 + 2]],
@@ -56,7 +56,7 @@ class PoseEvent {
   /// Landmarks, or `null` for a no-detection marker or a preview frame
   final PoseFrame? frame;
 
-  /// A downscaled JPEG of the same upright frame the landmarks came from
+  /// Downscaled JPEG of the upright frame
   final Uint8List? previewJpeg;
 
   bool get isPreview => previewJpeg != null;
@@ -69,7 +69,7 @@ class PoseStream {
   static const MethodChannel _control =
       MethodChannel('ua.lpnu.intelligent_rehab/pose_control');
 
-  /// Setting the lens and model before subscribing
+  /// Sets the lens and model before subscribing
   static Future<void> configure({
     bool frontCamera = true,
     String model = 'pose_landmarker_lite.task',
@@ -79,9 +79,7 @@ class PoseStream {
         'model': model,
       });
 
-  /// Everything the native side emits: pose frames, no-detection markers, and preview
-  /// JPEGs. One broadcast stream, because `receiveBroadcastStream` can only be listened to
-  /// once per channel without re-invoking `onListen` natively
+  /// All native events on one broadcast stream: poses, no-detection markers, previews
   static Stream<PoseEvent> events() {
     return _events.receiveBroadcastStream().map((dynamic event) {
       final map = (event as Map).cast<Object?, Object?>();
@@ -106,8 +104,7 @@ class PoseStream {
       .where((e) => !e.isPreview)
       .map((e) => e.frame);
 
-  /// Kotlin's `FloatArray` arrives as a `Float32List` under the standard codec, but a plain
-  /// `List<double>` if the payload is ever rebuilt by hand
+  /// Accepts a `Float32List` or a plain numeric list
   static Float32List _asFloat32(Object? value) => value is Float32List
       ? value
       : Float32List.fromList((value as List).cast<num>().map((n) => n.toDouble()).toList());

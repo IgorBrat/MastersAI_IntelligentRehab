@@ -1,12 +1,14 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intelligent_rehab/analysis/cues.dart';
 
-/// Shoulder abduction, seated: target 90, ceiling 150 (from the protocol).
+/// Seated shoulder abduction: target 90, ceiling 150
 RepPhase phaseAt(
   double angle, {
   bool rising = true,
   bool calibrating = false,
   bool inRep = true,
+  double heldFor = 0.0,
+  double holdSeconds = 2.0,
 }) =>
     repPhase(
       angleDeg: angle,
@@ -15,6 +17,8 @@ RepPhase phaseAt(
       rising: rising,
       calibrating: calibrating,
       detectorInRep: inRep,
+      secondsAtTarget: heldFor,
+      holdSeconds: holdSeconds,
     );
 
 void main() {
@@ -32,9 +36,6 @@ void main() {
       expect(phaseAt(90), RepPhase.atTarget);
     });
 
-    /// The reported bug: the arm raised well above the head still read as "higher"
-    /// because the old cue was keyed on the detector's hysteresis flag, which stays
-    /// true for the whole repetition.
     test('an arm above the head is never told to go higher', () {
       for (final angle in [95.0, 120.0, 150.0, 170.0, 179.0]) {
         final phase = phaseAt(angle);
@@ -47,7 +48,7 @@ void main() {
     });
 
     test('tolerates jitter just below the target', () {
-      // 5 deg band: a patient holding at 86 must not be nagged upward.
+      // 5 deg band below the target
       expect(phaseAt(86), RepPhase.atTarget);
       expect(phaseAt(84), RepPhase.raising);
     });
@@ -58,6 +59,30 @@ void main() {
 
     test('calibrating wins over everything', () {
       expect(phaseAt(140, calibrating: true), RepPhase.calibrating);
+    });
+
+    test('the hold ends in an instruction to come down', () {
+      expect(phaseAt(95, heldFor: 0.0), RepPhase.atTarget);
+      expect(phaseAt(95, heldFor: 1.9), RepPhase.atTarget);
+      expect(phaseAt(95, heldFor: 2.0), RepPhase.lowerNow);
+      expect(phaseAt(95, heldFor: 6.0), RepPhase.lowerNow,
+          reason: 'holding too long must not revert to "hold"');
+    });
+
+    /// The caller substitutes a cueing default for a zero hold, see `_holdCueSeconds`
+    test('a zero hold is the callers problem, not this functions', () {
+      expect(phaseAt(95, heldFor: 0.0, holdSeconds: 0.0), RepPhase.lowerNow);
+    });
+
+    test('lowerNow is an instruction, lowering is an observation', () {
+      expect(phaseAt(95, heldFor: 3.0, rising: false), RepPhase.lowerNow,
+          reason: 'still at the top, whatever the direction of travel');
+      expect(phaseAt(60, rising: false, heldFor: 3.0), RepPhase.lowering);
+    });
+
+    /// The caller starts the hold clock on band entry, so 84 deg has no dwell
+    test('the hold is only counted inside the band', () {
+      expect(phaseAt(84, heldFor: 9.0), RepPhase.raising);
     });
   });
 
@@ -78,8 +103,7 @@ void main() {
       expect(t.rising, isFalse);
     });
 
-    /// The reason the deadband exists: holding at end range produces small
-    /// alternating deltas, and a naive sign test flips the cue every frame.
+    /// Holding at end range gives small alternating deltas
     test('sub-deadband jitter does not flip direction', () {
       final t = DirectionTracker();
       t.add(10.0);
@@ -90,12 +114,10 @@ void main() {
       expect(t.rising, isTrue);
     });
 
-    /// Drift smaller than the deadband must still accumulate, or a slow lowering
-    /// would never be detected at all.
     test('slow drift below the deadband still accumulates', () {
       final t = DirectionTracker(deadbandDeg: 0.8);
       t.add(90.0);
-      // Five 0.3-degree steps down: no single step crosses 0.8, the total is 1.5.
+      // Five 0.3 deg steps: none crosses 0.8, the total is 1.5
       for (final v in [89.7, 89.4, 89.1, 88.8, 88.5]) {
         t.add(v);
       }

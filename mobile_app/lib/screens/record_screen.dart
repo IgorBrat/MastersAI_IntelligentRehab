@@ -10,23 +10,21 @@ import '../analysis/cues.dart';
 import '../analysis/live_angles.dart';
 import '../analysis/rep_detector.dart';
 import '../analysis/spoken_cues.dart';
-import '../api/client.dart';
+import '../api/client.dart' show Assessment, ExerciseInfo, Readiness;
 import '../config.dart';
 import '../pose/pose_stream.dart';
+import '../scoring/rehab_engine.dart';
 import '../storage/local_store.dart';
 import '../storage/session_record.dart';
 import '../widgets/skeleton_overlay.dart';
 import 'summary_screen.dart';
+import '../clinical/error_names.dart';
 
-/// What the screen is doing. The framing check comes FIRST, deliberately
+/// What the screen is doing; the framing check comes first
 enum _Stage {
-  /// Camera live, checking the framing. Nothing is being recorded yet
+  /// Camera live, checking the framing, nothing recorded yet
   preparing,
-
-  /// Recording and scoring repetitions
   recording,
-
-  /// Posting the set
   finishing,
 }
 
@@ -34,7 +32,7 @@ enum _Stage {
 class RecordScreen extends StatefulWidget {
   const RecordScreen({
     super.key,
-    required this.baseUrl,
+    required this.engine,
     required this.exercise,
     required this.side,
     this.romTarget,
@@ -45,17 +43,18 @@ class RecordScreen extends StatefulWidget {
     this.onLabel,
   });
 
-  final String baseUrl;
+  final RehabEngine engine;
   final ExerciseInfo exercise;
   final BodySide side;
 
   /// The coach's current target, when one has been applied
   final double? romTarget;
 
-  /// Repetitions this set asks for. The set ends itself on reaching it
+  /// Repetitions this set asks for; the set ends on reaching it
   final int? reps;
 
-  /// Which set of how many, for the label only
+  /// Which set of how many, for the label only. One screen visit is one set,
+  /// so `fatigue_trend` never spans a rest period
   final int setIndex;
   final int sets;
 
@@ -69,8 +68,16 @@ class RecordScreen extends StatefulWidget {
 }
 
 class _RecordScreenState extends State<RecordScreen> {
-
+  /// Lean cue threshold, degrees. UI heuristic, looser than the scored criterion
   static const double _leanCueDeg = 12.0;
+
+  /// Girdle hike cue threshold, torso lengths. UI heuristic, looser than the
+  /// scored band (~0.07 TL)
+  static const double _hikeCueTl = 0.10;
+
+  /// Speed cue fires above this multiple of the prescribed average phase speed.
+  /// A minimum-jerk movement at tempo peaks at ~1.9x
+  static const double _speedCueFactor = 3.5;
 
   /// Frames kept while preparing, for the readiness check
   static const int _readinessFrames = 60;
@@ -78,7 +85,7 @@ class _RecordScreenState extends State<RecordScreen> {
   /// How often the framing is re-checked while preparing
   static const Duration _readinessEvery = Duration(seconds: 2);
 
-  late final RehabApi _api = RehabApi(widget.baseUrl);
+  RehabEngine get _api => widget.engine;
   final SpokenCues _cues = SpokenCues();
 
   /// The target actually in force for this patient
@@ -86,10 +93,7 @@ class _RecordScreenState extends State<RecordScreen> {
   int get _repTarget => widget.reps ?? widget.exercise.defaultReps;
 
   late final RepDetector _detector = RepDetector(targetDeg: _target);
-  /// The exercise's own primary channel, smoothed
   final Smoother _primary = Smoother();
-
-  /// The compensation this exercise watches, smoothed
   final Smoother _compensation = Smoother();
 
   /// Which channels to derive on device, taken from the protocol
@@ -97,9 +101,22 @@ class _RecordScreenState extends State<RecordScreen> {
       LiveChannel.fromPrimary(widget.exercise.primaryChannel);
   final DirectionTracker _direction = DirectionTracker();
 
+  /// Girdle hike above the resting height, smoothed, torso lengths
+  final Smoother _hike = Smoother();
+
+  /// Girdle heights seen while the detector learns the resting pose
+  final List<double> _girdleRest = [];
+  double? _girdleBaseline;
+
+  /// Angular velocity of the smoothed primary angle, degrees per second
+  final Smoother _velocity = Smoother();
+  double? _lastPrimary;
+  int? _lastPrimaryMs;
+
+  /// Frame timestamp when the angle entered the target band, null outside it
   int? _atTargetSinceMs;
 
-  /// How long to ask the patient to hold at the top
+  /// Hold to cue at the top; falls back to 2 s when self-paced scoring sends 0
   double get _holdCueSeconds =>
       widget.exercise.holdSeconds > 0 ? widget.exercise.holdSeconds : 2.0;
 
@@ -108,23 +125,22 @@ class _RecordScreenState extends State<RecordScreen> {
 
   _Stage _stage = _Stage.preparing;
 
-  /// Latest decoded preview frame
   ui.Image? _preview;
   bool _decoding = false;
 
-  /// Frames of the repetition currently in progress, for the per-rep POST
+  /// Frames of the repetition in progress
   final List<PoseFrame> _repWindow = [];
 
-  /// Every frame of the set, for the final POST
+  /// Every frame of the set, for the session score
   final List<PoseFrame> _sessionFrames = [];
 
   PoseFrame? _latest;
   bool _detected = false;
 
-  /// Something the patient cannot exercise through: no camera, no stream
+  /// Error that stops the session: no camera, no stream
   String? _fatalError;
 
-  /// A failed request that the set carries on past
+  /// Error the set carries on past; cleared by the next success
   String? _lastRepError;
 
   Readiness? _readiness;
@@ -145,10 +161,8 @@ class _RecordScreenState extends State<RecordScreen> {
     _subscription?.cancel();
     _preview?.dispose();
     _cues.stop();
-    // Releasing it here rather than on finishing: the patient can also leave via
-    // the back button, and a screen that never sleeps again is a flat battery
+    // Released here so leaving via the back button also lets the screen sleep
     WakelockPlus.disable();
-    _api.close();
     super.dispose();
   }
 
@@ -159,13 +173,11 @@ class _RecordScreenState extends State<RecordScreen> {
       return;
     }
 
-    // A set runs for minutes with no touch input, so the screen would otherwise
-    // dim and lock part way through
+    // Keep the screen on through a set with no touch input
     await WakelockPlus.enable();
     await _cues.init();
 
-    // The patient is side-on to the phone for a sagittal exercise and cannot see
-    // the screen, so the BACK camera is the one pointing at them.
+    // Sagittal exercises use the back camera; the patient is side-on
     final frontal = widget.exercise.requiredView.toUpperCase() == 'FRONTAL';
     await PoseStream.configure(frontCamera: frontal);
 
@@ -201,7 +213,7 @@ class _RecordScreenState extends State<RecordScreen> {
         _preview = decoded;
       });
     } catch (_) {
-      // A corrupt preview frame is not worth interrupting the session for.
+      // Skip a corrupt preview frame
     } finally {
       _decoding = false;
     }
@@ -215,7 +227,7 @@ class _RecordScreenState extends State<RecordScreen> {
 
     _repWindow.add(frame);
     if (_stage == _Stage.preparing) {
-      // Keep only enough to check the framing; nothing here is scored
+      // Keep only enough to check the framing
       if (_repWindow.length > _readinessFrames) _repWindow.removeAt(0);
       if (mounted) {
         setState(() {
@@ -229,18 +241,34 @@ class _RecordScreenState extends State<RecordScreen> {
     final angles = LiveAngles.fromFrame(frame, widget.side, channel: _channel);
     final elevation = _primary.add(angles.primaryDeg);
     _compensation.add(angles.compensationDeg);
-    // Direction is taken from the SMOOTHED angle, not the raw one
     _direction.add(elevation);
+
+    // Speed off the smoothed angle, on frame timestamps
+    final last = _lastPrimary;
+    final lastMs = _lastPrimaryMs;
+    if (last != null && lastMs != null && frame.timestampMs > lastMs) {
+      _velocity.add((elevation - last) * 1000.0 / (frame.timestampMs - lastMs));
+    }
+    _lastPrimary = elevation;
+    _lastPrimaryMs = frame.timestampMs;
+
+    // Girdle resting height is learned with the detector baseline (median)
+    if (_detector.calibrating) {
+      _girdleRest.add(angles.girdleHeightTl);
+    } else {
+      final baseline = _girdleBaseline ??= _girdleRest.isEmpty
+          ? angles.girdleHeightTl
+          : (List<double>.from(_girdleRest)..sort())[_girdleRest.length ~/ 2];
+      _hike.add(angles.girdleHikeTl(baseline));
+    }
 
     _sessionFrames.add(frame);
     if (_repWindow.length > Config.maxFramesPerRep) {
-      // The detector has not fired for a long time -- the patient is not reaching
-      // the rise threshold. Drop the oldest frame rather than growing unbounded.
+      // No rep detected for a long time; cap the buffer
       _repWindow.removeAt(0);
     }
 
-    // Entering and leaving the target band drives the hold timer. Using the same
-    // tolerance as `repPhase` keeps the timer and the phase in step.
+    // Hold timer, same tolerance as `repPhase`
     if (elevation >= _target - kTargetToleranceDeg) {
       _atTargetSinceMs ??= frame.timestampMs;
     } else {
@@ -260,7 +288,7 @@ class _RecordScreenState extends State<RecordScreen> {
 
   /// Slicing the detected repetition out of the buffer and scoring it
   void _onRepetition(DetectedRep rep) {
-
+    // Score only the movement bounds, not the rest before it
     final window = [
       for (final f in _repWindow)
         if (f.timestampMs >= rep.startMs && f.timestampMs <= rep.endMs) f,
@@ -291,7 +319,8 @@ class _RecordScreenState extends State<RecordScreen> {
           _lastRepError = null;
         });
       }
-    } on ApiException catch (e) {
+    } on ScoringException catch (e) {
+      // The set continues; the session score still covers every frame
       if (mounted) setState(() => _lastRepError = e.message);
     } finally {
       if (mounted) setState(() => _scoring = false);
@@ -309,7 +338,7 @@ class _RecordScreenState extends State<RecordScreen> {
         frames: List<PoseFrame>.from(_repWindow),
       );
       if (mounted) setState(() => _readiness = readiness);
-    } on ApiException catch (e) {
+    } on ScoringException catch (e) {
       if (mounted) setState(() => _lastRepError = e.message);
     } finally {
       _checkingReadiness = false;
@@ -324,6 +353,12 @@ class _RecordScreenState extends State<RecordScreen> {
     _primary.reset();
     _compensation.reset();
     _direction.reset();
+    _hike.reset();
+    _girdleRest.clear();
+    _girdleBaseline = null;
+    _velocity.reset();
+    _lastPrimary = null;
+    _lastPrimaryMs = null;
     setState(() => _stage = _Stage.recording);
     _cues.say('Починайте', urgent: true);
   }
@@ -346,16 +381,15 @@ class _RecordScreenState extends State<RecordScreen> {
     }
 
     try {
-      // Guard for a set that overran the service's frame cap
-      final posted = RehabApi.fitToCap(_sessionFrames);
+      // Trim a set that overran the frame cap
+      final posted = RehabEngine.fitToCap(_sessionFrames);
       final session = await _api.assessSession(
         exerciseId: widget.exercise.id,
         side: widget.side,
         frames: posted,
       );
 
-      // Keep the exact input the score came from, so a later threshold or model
-      // change can be re-scored against it rather than re-recorded
+      // Save the scored input so it can be re-scored later
       final at = DateTime.now();
       String? recordingId;
       try {
@@ -369,7 +403,7 @@ class _RecordScreenState extends State<RecordScreen> {
           ),
         );
       } catch (_) {
-        // A full disk must not cost the patient their score
+        // A failed save does not block the score
       }
 
       final record = SessionRecord.fromAssessment(
@@ -389,7 +423,7 @@ class _RecordScreenState extends State<RecordScreen> {
           onLabel: widget.onLabel,
         ),
       ));
-    } on ApiException catch (e) {
+    } on ScoringException catch (e) {
       if (mounted) {
         setState(() {
           _lastRepError = e.message;
@@ -414,7 +448,6 @@ class _RecordScreenState extends State<RecordScreen> {
     );
   }
 
-  /// Seconds the angle has been inside the target band
   double get _secondsAtTarget {
     final since = _atTargetSinceMs;
     final now = _latest?.timestampMs;
@@ -424,10 +457,48 @@ class _RecordScreenState extends State<RecordScreen> {
 
   bool get _leaning => (_compensation.value ?? 0) > _leanCueDeg;
 
-  /// What to show, and what to say. Speech and text stay in step by construction
+  /// Girdle rising beyond what the arm's elevation explains, inside a rep only
+  bool get _hiking =>
+      _girdleBaseline != null &&
+      _detector.inRepetition &&
+      (_hike.value ?? 0) > _hikeCueTl;
+
+  /// Prescribed lifting and lowering speeds, deg/s; null when the primary
+  /// channel is not derived on device
+  (double, double)? get _phaseSpeeds {
+    final channelMatches = switch (_channel) {
+      LiveChannel.shoulderFlexion => widget.exercise.primaryChannel == 'shoulder_flexion',
+      LiveChannel.shoulderAbduction => widget.exercise.primaryChannel == 'shoulder_abduction',
+      LiveChannel.elbowFlexion => widget.exercise.primaryChannel == 'elbow_flexion',
+      LiveChannel.shoulderElevation => false,
+    };
+    final baseline = _detector.baseline;
+    if (!channelMatches || baseline == null) return null;
+    final excursion = (_target - baseline).abs();
+    final up = widget.exercise.concentricSeconds;
+    final down = widget.exercise.eccentricSeconds;
+    if (excursion < 1e-6 || up <= 0 || down <= 0) return null;
+    return (excursion / up, excursion / down);
+  }
+
+  bool get _rushing {
+    final speeds = _phaseSpeeds;
+    final v = _velocity.value;
+    if (speeds == null || v == null || !_detector.inRepetition) return false;
+    final limit = _speedCueFactor * (v >= 0 ? speeds.$1 : speeds.$2);
+    return v.abs() > limit;
+  }
+
+  /// A compensation is under way; its cue is urgent
+  bool get _warningActive => _hiking || _rushing || _leaning;
+
+  /// Cue text, shown and spoken
   String get _cueText {
     if (_fatalError != null) return _fatalError!;
     if (!_detected) return 'Вас не видно - станьте перед камерою';
+    // Injury-risk errors before the lean
+    if (_hiking) return 'Опустіть плече - не піднімайте його до вуха';
+    if (_rushing) return 'Повільніше - контролюйте рух';
     if (_leaning) return _channel.compensationCueUk;
 
     return switch (_phase) {
@@ -444,9 +515,10 @@ class _RecordScreenState extends State<RecordScreen> {
 
   void _speakCue() {
     if (_stage != _Stage.recording) return;
+    // Compensation and end-of-hold interrupt; phase guidance waits its turn
     _cues.say(
       _cueText,
-      urgent: _leaning || _phase == RepPhase.lowerNow,
+      urgent: _warningActive || _phase == RepPhase.lowerNow,
     );
   }
 
@@ -485,9 +557,8 @@ class _RecordScreenState extends State<RecordScreen> {
     final progress = (elevation / _target).clamp(0.0, 1.0).toDouble();
     final phase = _phase;
     final warning =
-        _leaning || phase == RepPhase.overshoot || !_detected || _fatalError != null;
-    // Reaching the prescribed excursion is the one moment worth marking
-    // positively - the patient cannot see the gauge and their own arm at once
+        _warningActive || phase == RepPhase.overshoot || !_detected || _fatalError != null;
+    // Highlight reaching the target
     final onTarget = !warning && phase == RepPhase.atTarget;
 
     return [
@@ -568,7 +639,8 @@ class _RecordScreenState extends State<RecordScreen> {
                 padding: const EdgeInsets.only(top: 6),
                 child: Text(
                   errors.entries
-                      .map((e) => widget.exercise.watchedErrors[e.key] ?? e.key)
+                      .map((e) => errorCueUk(e.key,
+                          watched: widget.exercise.watchedErrors))
                       .join('\n'),
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
@@ -678,6 +750,7 @@ class _PreparePanel extends StatelessWidget {
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 10),
+          // Startable even when not ready; the warning stays visible
           FilledButton.icon(
             onPressed: fatalError != null ? null : onStart,
             icon: Icon(_ready ? Icons.play_arrow : Icons.warning_amber),
